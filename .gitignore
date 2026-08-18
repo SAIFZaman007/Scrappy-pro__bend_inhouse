@@ -1,0 +1,13 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+node_modules/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+data/
+*.csv
+*.xlsx
+.DS_Store

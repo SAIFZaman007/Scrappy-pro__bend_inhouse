@@ -1,0 +1,50 @@
+[project]
+name = "scrappy-pro-backend"
+version = "1.0.0"
+description = "Scrappy Pro - bulk product data collection API"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "gunicorn>=23.0.0",
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.6.0",
+  "sqlalchemy[asyncio]>=2.0.36",
+  "asyncpg>=0.30.0",
+  "alembic>=1.14.0",
+  "psycopg[binary]>=3.2.0",
+  "redis>=5.2.0",
+  "arq>=0.26.0",
+  "httpx[http2]>=0.27.2",
+  "selectolax>=0.3.21",
+  "tenacity>=9.0.0",
+  "python-jose[cryptography]>=3.3.0",
+  "passlib[argon2]>=1.7.4",
+  "python-multipart>=0.0.12",
+  "slowapi>=0.1.9",
+  "structlog>=24.4.0",
+  "openpyxl>=3.1.5",
+  "orjson>=3.10.7",
+  "email-validator>=2.2.0",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.48.0"]
+dev = [
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
+  "ruff>=0.7.0",
+  "mypy>=1.13.0",
+  "respx>=0.21.1",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "S", "C4"]
+ignore = ["S101", "B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

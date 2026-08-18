@@ -1,0 +1,111 @@
+{
+  "source": "MAKgadgets_Category_Hierarchy.pdf",
+  "categories": [
+    {
+      "slug": "desktops",
+      "name": "Desktops",
+      "subcategories": ["Gaming PC", "Workstation", "Office PC", "All-in-One"]
+    },
+    {
+      "slug": "laptops",
+      "name": "Laptops",
+      "subcategories": ["Gaming", "Business", "Student", "Ultrabook", "MacBook"]
+    },
+    {
+      "slug": "components",
+      "name": "Components",
+      "subcategories": [
+        "Processor",
+        "Graphics Card",
+        "Motherboard",
+        "RAM",
+        "SSD",
+        "HDD",
+        "Power Supply",
+        "CPU Cooler",
+        "Casing",
+        "Case Fan",
+        "UPS",
+        "Operating System"
+      ]
+    },
+    {
+      "slug": "monitors",
+      "name": "Monitors",
+      "subcategories": ["Gaming", "4K", "Office", "Ultrawide"]
+    },
+    {
+      "slug": "phone",
+      "name": "Phone",
+      "subcategories": ["iPhone", "Android", "Feature Phone", "Refurbished"]
+    },
+    {
+      "slug": "tablet",
+      "name": "Tablet",
+      "subcategories": ["iPad", "Android Tablet", "Drawing Tablet", "Kids Tablet"]
+    },
+    {
+      "slug": "office-equipment",
+      "name": "Office Equipment",
+      "subcategories": ["Printer", "Scanner", "Photocopier", "Projector", "Shredder"]
+    },
+    {
+      "slug": "camera",
+      "name": "Camera",
+      "subcategories": ["DSLR", "Mirrorless", "Action Camera", "Lens", "Tripod"]
+    },
+    {
+      "slug": "security",
+      "name": "Security",
+      "subcategories": ["CCTV", "IP Camera", "DVR/NVR", "Smart Lock", "Access Control"]
+    },
+    {
+      "slug": "networking",
+      "name": "Networking",
+      "subcategories": ["Router", "Switch", "Cable", "WiFi Adapter", "Access Point"]
+    },
+    {
+      "slug": "software",
+      "name": "Software",
+      "subcategories": ["Operating System", "Antivirus", "Office Suite", "Design", "Utility"]
+    },
+    {
+      "slug": "server-storage",
+      "name": "Server & Storage",
+      "subcategories": ["Server", "NAS", "External Drive", "Enterprise SSD", "RAID"]
+    },
+    {
+      "slug": "accessories",
+      "name": "Accessories",
+      "subcategories": [
+        "Keyboard",
+        "Mouse",
+        "Mouse Pad",
+        "Headphone",
+        "Webcam",
+        "Speaker",
+        "Microphone"
+      ]
+    },
+    {
+      "slug": "gadgets",
+      "name": "Gadgets",
+      "subcategories": ["Smartwatch", "Earbuds", "Power Bank", "Drone", "Smart Home"]
+    },
+    {
+      "slug": "gaming-gear",
+      "name": "Gaming Gear",
+      "subcategories": ["Controller", "Gaming Chair", "Gaming Mouse", "Headset", "Console"]
+    },
+    {
+      "slug": "tv",
+      "name": "TV",
+      "subcategories": ["Smart TV", "4K TV", "Android TV", "TV Box", "Soundbar"]
+    },
+    {
+      "slug": "apple-store",
+      "name": "Apple Store",
+      "subcategories": ["Mac", "iPad", "iPhone", "Apple Watch", "AirPods", "Apple Accessories"]
+    }
+  ]
+}
