@@ -164,4 +164,5 @@ class HealthOut(BaseModel):
     status: Literal["ok", "degraded"]
     database: bool
     queue: bool
+    worker_alive: bool
     version: str

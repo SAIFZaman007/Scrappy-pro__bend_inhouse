@@ -8,7 +8,7 @@ Everything else (paging, politeness, retries, dedupe, progress) is inherited.
 from __future__ import annotations
 
 import abc
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -72,7 +72,7 @@ class ListingPage:
     has_next: bool
 
 
-ProgressHook = Callable[[str, int], None]
+ProgressHook = Callable[[str, int], Awaitable[None]]
 
 
 class BaseScraper(abc.ABC):
@@ -119,7 +119,7 @@ class BaseScraper(abc.ABC):
 
             listing = self.parse_listing(result)
             if on_page:
-                on_page(result.url, len(listing.products))
+                await on_page(result.url, len(listing.products))
 
             fresh = [p for p in listing.products if p.product_url not in seen]
             if not fresh:

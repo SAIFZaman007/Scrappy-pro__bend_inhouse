@@ -32,7 +32,7 @@ from app.services.seed import slugify  # noqa: F401  (kept for symmetry with see
 
 log = get_logger(__name__)
 
-BATCH_SIZE = 100
+BATCH_SIZE = 25
 MAX_EVENTS = 200
 
 
@@ -180,9 +180,14 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
                 pages_here = 0
                 buffer: list[ScrapedProduct] = []
 
-                def on_page(url: str, count: int) -> None:
+                async def on_page(url: str, count: int) -> None:
+                    # Committed immediately - not batched with products - so
+                    # "Pages read" moves in real time even before the first
+                    # product batch is large enough to flush.
                     nonlocal pages_here
                     pages_here += 1
+                    job.pages_fetched += 1
+                    await db.commit()
                     log.info("page.done", site=site.key, url=url, products=count)
 
                 try:
@@ -217,6 +222,12 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
                             fetch_details,
                             detail_concurrency,
                         )
+                    await _append_event(
+                        db,
+                        job,
+                        f"Finished {label} — {pages_here} pages read, "
+                        f"{job.products_found} products so far.",
+                    )
                 except (ChallengeDetected, BlockedByRobots) as exc:
                     await _append_event(db, job, f"{label}: {exc}", level="warning")
                     log.warning("category.blocked", site=site.key, label=label, error=str(exc))
@@ -225,7 +236,6 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
                     log.exception("category.failed", site=site.key, label=label)
 
                 job.completed_units += 1
-                job.pages_fetched += pages_here
                 await db.commit()
 
             job.status = "completed"

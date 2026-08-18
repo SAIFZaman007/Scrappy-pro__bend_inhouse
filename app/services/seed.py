@@ -1,174 +1,330 @@
-"""Idempotent bootstrap: taxonomy, sites, category mappings and the admin account.
+"""Job runner - the orchestration layer between a queued job and stored products.
 
-Runs on every boot. Re-running is safe - existing rows are updated, not duplicated,
-and a mapping that a human has already marked verified is never overwritten.
+Responsibilities, in order:
+  1. Resolve which retailer paths the selected subcategories map to.
+  2. Walk each category politely, page by page.
+  3. Optionally enrich each product from its detail page, with bounded concurrency.
+  4. Persist in batches so a long job never holds one giant transaction open.
+  5. Keep ``ScrapeJob`` progress current so the UI has something honest to show.
+
+Failure policy: a single bad page or product is logged and skipped. A site-wide
+problem (anti-bot challenge, robots.txt refusal) stops that category and is
+recorded on the job, because silently returning half a dataset is worse than
+reporting a partial run.
 """
 
 from __future__ import annotations
 
-import json
-import re
-from pathlib import Path
+import asyncio
+from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.core.security import hash_password
-from app.models.entities import Category, SiteCategoryMap, Site, Subcategory, User
-from app.scrapers.registry import SCRAPERS
-from app.taxonomy.site_maps import SITE_MAPS
+from app.models.entities import Product, ScrapeJob, Site, SiteCategoryMap, Subcategory
+from app.scrapers.base import ScrapedProduct
+from app.scrapers.http import BlockedByRobots, ChallengeDetected, PoliteClient
+from app.scrapers.registry import get_scraper_class
+from app.services.seed import slugify  # noqa: F401  (kept for symmetry with seeding)
 
 log = get_logger(__name__)
 
-TAXONOMY_PATH = Path(__file__).resolve().parent.parent / "taxonomy" / "taxonomy.json"
-
-# Per-site crawl policy. Slower where the storefront is heavier or more protected.
-SITE_POLICY = {
-    "startech": {"requests_per_second": 1.0, "concurrency": 4},
-    "techland": {"requests_per_second": 0.8, "concurrency": 3},
-    "ryans": {"requests_per_second": 0.8, "concurrency": 3},
-    "computermania": {"requests_per_second": 0.6, "concurrency": 2},
-}
+BATCH_SIZE = 25
+MAX_EVENTS = 200
 
 
-def slugify(value: str) -> str:
-    value = value.lower().strip()
-    value = re.sub(r"[/&]+", "-", value)
-    value = re.sub(r"[^a-z0-9]+", "-", value)
-    return re.sub(r"-{2,}", "-", value).strip("-")
+class JobCancelled(Exception):
+    pass
 
 
-async def seed_taxonomy(db: AsyncSession) -> dict[str, Subcategory]:
-    """Load categories/subcategories, returning a "cat/sub" -> row lookup."""
-    payload = json.loads(TAXONOMY_PATH.read_text(encoding="utf-8"))
-    lookup: dict[str, Subcategory] = {}
-
-    for position, item in enumerate(payload["categories"], start=1):
-        category = (
-            await db.execute(select(Category).where(Category.slug == item["slug"]))
-        ).scalar_one_or_none()
-        if category is None:
-            category = Category(slug=item["slug"], name=item["name"], position=position)
-            db.add(category)
-            await db.flush()
-        else:
-            category.name = item["name"]
-            category.position = position
-
-        for sub_position, sub_name in enumerate(item["subcategories"], start=1):
-            sub_slug = slugify(sub_name)
-            subcategory = (
-                await db.execute(
-                    select(Subcategory).where(
-                        Subcategory.category_id == category.id, Subcategory.slug == sub_slug
-                    )
-                )
-            ).scalar_one_or_none()
-            if subcategory is None:
-                subcategory = Subcategory(
-                    category_id=category.id,
-                    slug=sub_slug,
-                    name=sub_name,
-                    position=sub_position,
-                )
-                db.add(subcategory)
-                await db.flush()
-            else:
-                subcategory.name = sub_name
-                subcategory.position = sub_position
-            lookup[f"{item['slug']}/{sub_slug}"] = subcategory
-
-    await db.commit()
-    log.info("seed.taxonomy", subcategories=len(lookup))
-    return lookup
+async def _append_event(db: AsyncSession, job: ScrapeJob, message: str, level: str = "info") -> None:
+    """Append to the job's rolling event log, which the UI renders as a live tape."""
+    event = {
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "level": level,
+        "message": message,
+    }
+    job.events = ([*job.events, event])[-MAX_EVENTS:]
+    await db.flush()
 
 
-async def seed_sites(db: AsyncSession) -> dict[str, Site]:
-    sites: dict[str, Site] = {}
-    for key, scraper_cls in SCRAPERS.items():
-        policy = SITE_POLICY.get(key, {})
-        site = (await db.execute(select(Site).where(Site.key == key))).scalar_one_or_none()
-        if site is None:
-            site = Site(
-                key=key,
-                name=scraper_cls.name,
-                base_url=scraper_cls.base_url,
-                requests_per_second=policy.get("requests_per_second", 1.0),
-                concurrency=policy.get("concurrency", 3),
-            )
-            db.add(site)
-            await db.flush()
-        else:
-            site.name = scraper_cls.name
-            site.base_url = scraper_cls.base_url
-        sites[key] = site
-    await db.commit()
-    log.info("seed.sites", count=len(sites))
-    return sites
-
-
-async def seed_mappings(
-    db: AsyncSession, sites: dict[str, Site], subcategories: dict[str, Subcategory]
-) -> None:
-    created = skipped = 0
-    for site_key, mapping in SITE_MAPS.items():
-        site = sites.get(site_key)
-        if site is None:
-            continue
-        for taxonomy_key, url_path in mapping.items():
-            subcategory = subcategories.get(taxonomy_key)
-            if subcategory is None:
-                log.warning("seed.mapping_unknown_key", site=site_key, key=taxonomy_key)
-                continue
-            existing = (
-                await db.execute(
-                    select(SiteCategoryMap).where(
-                        SiteCategoryMap.site_id == site.id,
-                        SiteCategoryMap.subcategory_id == subcategory.id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if existing is None:
-                db.add(
-                    SiteCategoryMap(
-                        site_id=site.id,
-                        subcategory_id=subcategory.id,
-                        url_path=url_path,
-                        is_verified=False,
-                    )
-                )
-                created += 1
-            elif not existing.is_verified:
-                existing.url_path = url_path
-                skipped += 1
-            else:
-                skipped += 1
-    await db.commit()
-    log.info("seed.mappings", created=created, untouched=skipped)
-
-
-async def seed_admin(db: AsyncSession) -> None:
-    existing = (
-        await db.execute(select(User).where(User.email == settings.FIRST_ADMIN_EMAIL))
+async def _is_cancelled(db: AsyncSession, job_id: Any) -> bool:
+    status = (
+        await db.execute(select(ScrapeJob.status).where(ScrapeJob.id == job_id))
     ).scalar_one_or_none()
-    if existing:
-        return
-    db.add(
-        User(
-            email=settings.FIRST_ADMIN_EMAIL,
-            hashed_password=hash_password(settings.FIRST_ADMIN_PASSWORD),
-            full_name="Administrator",
-            is_admin=True,
+    return status == "cancelled"
+
+
+async def _resolve_targets(
+    db: AsyncSession, site_id: int, subcategory_ids: list[int]
+) -> list[tuple[SiteCategoryMap, Subcategory, str]]:
+    """Return (mapping, subcategory, category_name) for every mapped selection."""
+    rows = (
+        await db.execute(
+            select(SiteCategoryMap, Subcategory)
+            .join(Subcategory, Subcategory.id == SiteCategoryMap.subcategory_id)
+            .where(
+                SiteCategoryMap.site_id == site_id,
+                SiteCategoryMap.subcategory_id.in_(subcategory_ids),
+                SiteCategoryMap.is_enabled.is_(True),
+            )
         )
+    ).all()
+
+    targets = []
+    for mapping, subcategory in rows:
+        await db.refresh(subcategory, ["category"])
+        targets.append((mapping, subcategory, subcategory.category.name))
+    return targets
+
+
+def _to_model(
+    product: ScrapedProduct,
+    *,
+    job_id: Any,
+    site_id: int,
+    subcategory: Subcategory,
+    category_name: str,
+    sequence: int,
+) -> Product:
+    return Product(
+        job_id=job_id,
+        site_id=site_id,
+        subcategory_id=subcategory.id,
+        sequence=sequence,
+        external_id=product.external_id,
+        product_url=product.product_url,
+        name=product.name,
+        brand=product.brand,
+        category_name=category_name,
+        subcategory_name=subcategory.name,
+        price=product.price,
+        old_price=product.old_price,
+        currency=product.currency,
+        stock=product.stock,
+        rating=product.rating,
+        reviews=product.reviews,
+        badge=product.badge,
+        image=product.image,
+        images=product.images,
+        specs=product.specs,
+        description=product.description,
+        scraped_at=product.scraped_at,
+    )
+
+
+async def run_job(db: AsyncSession, job_id: Any) -> None:
+    job = (await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))).scalar_one_or_none()
+    if job is None:
+        log.error("job.missing", job_id=str(job_id))
+        return
+    if job.status not in ("queued", "running"):
+        log.info("job.skipped", job_id=str(job_id), status=job.status)
+        return
+
+    site = (await db.execute(select(Site).where(Site.id == job.site_id))).scalar_one()
+    options = job.options or {}
+    max_pages = min(
+        int(options.get("max_pages", 25)), settings.MAX_PAGES_PER_SUBCATEGORY
+    )
+    fetch_details = bool(options.get("fetch_details", True))
+    detail_concurrency = max(1, min(int(options.get("detail_concurrency", 4)), site.concurrency))
+
+    targets = await _resolve_targets(db, site.id, job.subcategory_ids)
+
+    job.status = "running"
+    job.started_at = datetime.now(UTC)
+    job.total_units = max(len(targets), 1)
+    job.completed_units = 0
+    job.products_found = 0
+    job.pages_fetched = 0
+    job.error_message = None
+    await _append_event(
+        db, job, f"Run started on {site.name} across {len(targets)} categories."
     )
     await db.commit()
-    log.info("seed.admin_created", email=settings.FIRST_ADMIN_EMAIL)
+
+    if not targets:
+        job.status = "failed"
+        job.finished_at = datetime.now(UTC)
+        job.error_message = (
+            "None of the selected categories are mapped for this site yet. "
+            "Map them under Settings, then run again."
+        )
+        await db.commit()
+        return
+
+    sequence = 0
+    scraper_cls = get_scraper_class(site.key)
+
+    try:
+        async with PoliteClient(
+            base_url=site.base_url,
+            requests_per_second=site.requests_per_second,
+            concurrency=site.concurrency,
+        ) as client:
+            scraper = scraper_cls(client)
+
+            for mapping, subcategory, category_name in targets:
+                if await _is_cancelled(db, job.id):
+                    raise JobCancelled
+
+                label = f"{category_name} / {subcategory.name}"
+                job.current_step = label
+                await _append_event(db, job, f"Collecting {label}")
+                await db.commit()
+
+                pages_here = 0
+                buffer: list[ScrapedProduct] = []
+
+                async def on_page(url: str, count: int) -> None:
+                    # Committed immediately - not batched with products - so
+                    # "Pages read" moves in real time even before the first
+                    # product batch is large enough to flush.
+                    nonlocal pages_here
+                    pages_here += 1
+                    job.pages_fetched += 1
+                    await db.commit()
+                    log.info("page.done", site=site.key, url=url, products=count)
+
+                try:
+                    async for product in scraper.iter_category(
+                        mapping.url_path, max_pages=max_pages, on_page=on_page
+                    ):
+                        buffer.append(product)
+                        if len(buffer) >= BATCH_SIZE:
+                            sequence = await _flush(
+                                db,
+                                job,
+                                buffer,
+                                scraper,
+                                site,
+                                subcategory,
+                                category_name,
+                                sequence,
+                                fetch_details,
+                                detail_concurrency,
+                            )
+                            buffer = []
+                    if buffer:
+                        sequence = await _flush(
+                            db,
+                            job,
+                            buffer,
+                            scraper,
+                            site,
+                            subcategory,
+                            category_name,
+                            sequence,
+                            fetch_details,
+                            detail_concurrency,
+                        )
+                    await _append_event(
+                        db,
+                        job,
+                        f"Finished {label} — {pages_here} pages read, "
+                        f"{job.products_found} products so far.",
+                    )
+                except (ChallengeDetected, BlockedByRobots) as exc:
+                    await _append_event(db, job, f"{label}: {exc}", level="warning")
+                    log.warning("category.blocked", site=site.key, label=label, error=str(exc))
+                except Exception as exc:  # noqa: BLE001
+                    await _append_event(db, job, f"{label} failed: {exc}", level="error")
+                    log.exception("category.failed", site=site.key, label=label)
+
+                job.completed_units += 1
+                await db.commit()
+
+            job.status = "completed"
+            job.current_step = None
+            job.finished_at = datetime.now(UTC)
+            await _append_event(
+                db, job, f"Run finished with {job.products_found} products collected."
+            )
+            await db.commit()
+
+    except JobCancelled:
+        job.status = "cancelled"
+        job.finished_at = datetime.now(UTC)
+        await _append_event(db, job, "Run cancelled.", level="warning")
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        job.status = "failed"
+        job.finished_at = datetime.now(UTC)
+        job.error_message = str(exc)[:2000]
+        await _append_event(db, job, f"Run failed: {exc}", level="error")
+        await db.commit()
+        log.exception("job.failed", job_id=str(job_id))
 
 
-async def run_all(db: AsyncSession) -> None:
-    subcategories = await seed_taxonomy(db)
-    sites = await seed_sites(db)
-    await seed_mappings(db, sites, subcategories)
-    await seed_admin(db)
+async def _flush(
+    db: AsyncSession,
+    job: ScrapeJob,
+    buffer: list[ScrapedProduct],
+    scraper: Any,
+    site: Site,
+    subcategory: Subcategory,
+    category_name: str,
+    sequence: int,
+    fetch_details: bool,
+    detail_concurrency: int,
+) -> int:
+    """Enrich (optionally), de-duplicate, and write one batch."""
+    if fetch_details:
+        limiter = asyncio.Semaphore(detail_concurrency)
+
+        async def enrich(item: ScrapedProduct) -> ScrapedProduct:
+            async with limiter:
+                return await scraper.enrich(item)
+
+        buffer = list(await asyncio.gather(*(enrich(item) for item in buffer)))
+
+    existing_urls = set(
+        (
+            await db.execute(
+                select(Product.product_url).where(
+                    Product.job_id == job.id,
+                    Product.product_url.in_([p.product_url for p in buffer]),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    added = 0
+    for product in buffer:
+        if product.product_url in existing_urls:
+            continue
+        sequence += 1
+        db.add(
+            _to_model(
+                product,
+                job_id=job.id,
+                site_id=site.id,
+                subcategory=subcategory,
+                category_name=category_name,
+                sequence=sequence,
+            )
+        )
+        existing_urls.add(product.product_url)
+        added += 1
+
+    await db.flush()
+    job.products_found += added
+    await db.commit()
+    return sequence
+
+
+async def recount_products(db: AsyncSession, job_id: Any) -> int:
+    total = (
+        await db.execute(select(func.count(Product.id)).where(Product.job_id == job_id))
+    ).scalar_one()
+    await db.execute(
+        update(ScrapeJob).where(ScrapeJob.id == job_id).values(products_found=total)
+    )
+    await db.commit()
+    return int(total)
