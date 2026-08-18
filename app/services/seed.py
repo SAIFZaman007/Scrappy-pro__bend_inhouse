@@ -1,3 +1,4 @@
+# backend/app/services/seed.py
 """Idempotent bootstrap: taxonomy, sites, category mappings and the admin account.
 
 Runs on every boot. Re-running is safe - existing rows are updated, not duplicated,
@@ -126,16 +127,31 @@ async def seed_sites(db: AsyncSession) -> dict[str, Site]:
 async def seed_mappings(
     db: AsyncSession, sites: dict[str, Site], subcategories: dict[str, Subcategory]
 ) -> None:
-    created = skipped = 0
+    """Apply site_maps.py to the database.
+
+    A mapping a human has verified (via the CLI's ``--mark`` or the admin API) is
+    never overwritten here, no matter what this file says - that confirmation is
+    worth more than anything re-derived from a page fetch. Everything else -
+    unverified rows, including ones seeded by a previous, less-accurate version of
+    this file - is kept in sync: updated if this file's answer changed, and removed
+    if this file no longer has an answer for it at all. A category we've since
+    decided we can't reliably map should disappear from the picker, not linger
+    there pointing at a URL we already know might be wrong.
+    """
+    created = updated = removed = untouched = 0
     for site_key, mapping in SITE_MAPS.items():
         site = sites.get(site_key)
         if site is None:
             continue
-        for taxonomy_key, url_path in mapping.items():
+
+        seen_subcategory_ids: set[int] = set()
+        for taxonomy_key, entry in mapping.items():
             subcategory = subcategories.get(taxonomy_key)
             if subcategory is None:
                 log.warning("seed.mapping_unknown_key", site=site_key, key=taxonomy_key)
                 continue
+            seen_subcategory_ids.add(subcategory.id)
+
             existing = (
                 await db.execute(
                     select(SiteCategoryMap).where(
@@ -144,23 +160,51 @@ async def seed_mappings(
                     )
                 )
             ).scalar_one_or_none()
+
             if existing is None:
                 db.add(
                     SiteCategoryMap(
                         site_id=site.id,
                         subcategory_id=subcategory.id,
-                        url_path=url_path,
-                        is_verified=False,
+                        url_path=entry.path,
+                        is_verified=entry.verified,
                     )
                 )
                 created += 1
             elif not existing.is_verified:
-                existing.url_path = url_path
-                skipped += 1
+                existing.url_path = entry.path
+                existing.is_verified = entry.verified
+                updated += 1
             else:
-                skipped += 1
+                untouched += 1
+
+        # Prune unverified rows this site used to have that are no longer in the
+        # file above - e.g. a category we'd guessed at before and have since
+        # decided not to, having found no reliable real URL for it. Skipped if a
+        # site's mapping is empty (should never happen) so an upstream mistake
+        # can't wipe out every mapping for a site in one seed run.
+        if seen_subcategory_ids:
+            stale = (
+                (
+                    await db.execute(
+                        select(SiteCategoryMap).where(
+                            SiteCategoryMap.site_id == site.id,
+                            SiteCategoryMap.is_verified.is_(False),
+                            SiteCategoryMap.subcategory_id.notin_(seen_subcategory_ids),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in stale:
+                await db.delete(row)
+                removed += 1
+
     await db.commit()
-    log.info("seed.mappings", created=created, untouched=skipped)
+    log.info(
+        "seed.mappings", created=created, updated=updated, removed=removed, untouched=untouched
+    )
 
 
 async def seed_admin(db: AsyncSession) -> None:
