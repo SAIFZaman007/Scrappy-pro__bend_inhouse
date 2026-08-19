@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1.7
+#
+# Identical to Dockerfile, minus the HEALTHCHECK. This image runs the arq
+# worker (CMD ["worker"]), which never opens port 8000 - the api image's
+# `curl http://localhost:8000/...` healthcheck would never pass for it and
+# Coolify would roll it back in an endless restart loop. Health for this
+# process is instead observed indirectly: the api's /api/v1/health endpoint
+# reports `worker_alive` from the heartbeat this container writes to Redis
+# every ~10s (see app/core/heartbeat.py). Watch that field, not this container.
+
+FROM mcr.microsoft.com/playwright/python:v1.49.1-noble AS builder
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
+WORKDIR /build
+COPY pyproject.toml ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip wheel --wheel-dir /build/wheels .
+
+FROM mcr.microsoft.com/playwright/python:v1.49.1-noble AS runtime
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+RUN useradd --create-home --uid 10001 scrappy || true
+COPY --from=builder /build/wheels /tmp/wheels
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip \
+ && pip install --break-system-packages /tmp/wheels/*.whl \
+ && rm -rf /tmp/wheels
+WORKDIR /app
+COPY --chown=scrappy:scrappy . .
+RUN mkdir -p /data/exports && chown -R scrappy:scrappy /data \
+ && chmod +x /app/entrypoint.sh
+USER scrappy
+
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["worker"]
