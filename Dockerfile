@@ -1,20 +1,15 @@
 # syntax=docker/dockerfile:1.7
 
-ARG BASE_IMAGE=mcr.microsoft.com/playwright/python:v1.49.1-noble
-
 # ---------- builder ----------
-FROM ${BASE_IMAGE} AS builder
+FROM python:3.12-slim-bookworm AS builder
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
 WORKDIR /build
 
-# Copy project definition and build virtualenv directly
 COPY pyproject.toml ./
-RUN python -m venv /opt/venv \
- && /opt/venv/bin/pip install --upgrade pip \
- && /opt/venv/bin/pip install .
+RUN pip wheel --no-cache-dir --wheel-dir /build/wheels .
 
 # ---------- runtime ----------
-FROM ${BASE_IMAGE} AS runtime
+FROM mcr.microsoft.com/playwright/python:v1.49.1-noble AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -22,7 +17,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 RUN useradd --create-home --uid 10001 scrappy || true
 
-COPY --from=builder /opt/venv /opt/venv
+# Copy wheels from builder and install using Python's native pip in runtime
+COPY --from=builder /build/wheels /tmp/wheels
+RUN python -m pip install --upgrade pip \
+ && python -m venv /opt/venv \
+ && /opt/venv/bin/pip install /tmp/wheels/*.whl \
+ && rm -rf /tmp/wheels
 
 WORKDIR /app
 COPY --chown=scrappy:scrappy . .
