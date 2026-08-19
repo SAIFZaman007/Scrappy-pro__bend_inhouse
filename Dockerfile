@@ -6,7 +6,8 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
 WORKDIR /build
 
 COPY pyproject.toml ./
-RUN pip wheel --no-cache-dir --wheel-dir /build/wheels .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip wheel --wheel-dir /build/wheels .
 
 # ---------- runtime ----------
 FROM mcr.microsoft.com/playwright/python:v1.49.1-noble AS runtime
