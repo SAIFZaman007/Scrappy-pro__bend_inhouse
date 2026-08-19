@@ -1,14 +1,4 @@
 # syntax=docker/dockerfile:1.7
-#
-# Two changes from the previous image:
-#
-# 1. `brotli` and `zstandard` now come in via pyproject.toml, so the runtime can
-#    actually decode what these origins send. Without them the container ran
-#    fine and produced nothing.
-# 2. Chromium plus its shared libraries are installed for the headless-browser
-#    fallback. This adds roughly 400 MB. If you are certain you will never scrape
-#    Computer Mania BD, set BROWSER_FALLBACK_ENABLED=false and comment out the
-#    `playwright install` line and the apt block that follows it.
 
 # ---------- builder ----------
 FROM python:3.12-slim AS builder
@@ -34,9 +24,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 
 COPY --from=builder /opt/venv /opt/venv
 
-# Chromium + system libs for the browser fallback. `--with-deps` pulls the exact
-# apt packages Playwright needs, which is far more reliable than maintaining our
-# own list of libnss3/libatk/etc.
 RUN playwright install --with-deps chromium \
  && chmod -R a+rx /opt/playwright \
  && rm -rf /var/lib/apt/lists/*
@@ -44,6 +31,10 @@ RUN playwright install --with-deps chromium \
 WORKDIR /app
 COPY --chown=scrappy:scrappy . .
 RUN mkdir -p /data/exports && chown -R scrappy:scrappy /data
+
+# FIX: Grant explicit execution permissions to the entrypoint script
+RUN chmod +x /app/entrypoint.sh
+
 USER scrappy
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
