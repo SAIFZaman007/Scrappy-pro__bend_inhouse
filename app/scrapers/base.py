@@ -1,3 +1,4 @@
+# backend/app/scrapers/base.py
 """The scraper contract.
 
 Adding a fifth retailer means writing one subclass with three methods -
@@ -15,7 +16,7 @@ from decimal import Decimal
 
 from app.core.logging import get_logger
 from app.scrapers.http import FetchResult, PoliteClient
-from app.scrapers.parsing import parse_html
+from app.scrapers.parsing import parse_html, sniff_product_cards
 
 log = get_logger(__name__)
 
@@ -102,6 +103,39 @@ class BaseScraper(abc.ABC):
         """Extract the richer fields available only on a product page."""
 
     # -- shared machinery --------------------------------------------------
+    def parse_listing_with_fallback(self, result: FetchResult) -> tuple[ListingPage, bool]:
+        """This site's own selectors first; a structural sniff as the backstop.
+
+        Returns ``(listing, used_fallback)``. The fallback only runs when
+        ``parse_listing`` found nothing on a page that did return real HTML - a
+        working category never pays for the extra parse, and a broken one still
+        yields something instead of silently reporting zero products. Both the
+        live runner and the ``verify``/``sample`` CLI commands go through this
+        same path, so what the CLI reports is what a real run would actually do.
+        """
+        listing = self.parse_listing(result)
+        if listing.products or not result.html:
+            return listing, False
+
+        sniffed = sniff_product_cards(self.doc(result), self.base_url)
+        if not sniffed:
+            return listing, False
+
+        log.info(
+            "listing.sniffed_fallback", site=self.key, url=result.url, count=len(sniffed)
+        )
+        products = [
+            ScrapedProduct(
+                product_url=item["url"],
+                name=item["name"],
+                price=item["price"],
+                image=item["image"],
+                images=[item["image"]] if item["image"] else [],
+            )
+            for item in sniffed
+        ]
+        return ListingPage(products=products, has_next=True), True
+
     async def iter_category(
         self,
         url_path: str,
@@ -117,7 +151,7 @@ class BaseScraper(abc.ABC):
                 log.info("listing.not_found", site=self.key, path=path)
                 break
 
-            listing = self.parse_listing(result)
+            listing, _used_fallback = self.parse_listing_with_fallback(result)
             if on_page:
                 await on_page(result.url, len(listing.products))
 

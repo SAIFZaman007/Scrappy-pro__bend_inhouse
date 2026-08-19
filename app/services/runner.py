@@ -8,9 +8,11 @@ Responsibilities, in order:
   5. Keep ``ScrapeJob`` progress current so the UI has something honest to show.
 
 Failure policy: a single bad page or product is logged and skipped. A site-wide
-problem (anti-bot challenge, robots.txt refusal) stops that category and is
-recorded on the job, because silently returning half a dataset is worse than
-reporting a partial run.
+problem (anti-bot challenge, robots.txt refusal, a bare 403) stops that category
+and is recorded on the job, because silently returning half a dataset is worse
+than reporting a partial run. If several categories in a row are blocked this
+way, the whole run stops early rather than grinding through the rest of the
+selection against a site that has already made its answer clear.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.models.entities import Product, ScrapeJob, Site, SiteCategoryMap, Subcategory
 from app.scrapers.base import ScrapedProduct
-from app.scrapers.http import BlockedByRobots, ChallengeDetected, PoliteClient
+from app.scrapers.http import AccessBlocked, BlockedByRobots, ChallengeDetected, PoliteClient
 from app.scrapers.registry import get_scraper_class
 from app.services.seed import slugify  # noqa: F401  (kept for symmetry with seeding)
 
@@ -34,6 +36,9 @@ log = get_logger(__name__)
 
 BATCH_SIZE = 25
 MAX_EVENTS = 200
+# After this many categories in a row come back blocked, stop the job rather than
+# working through the rest of the selection - the site has already answered.
+BLOCK_CIRCUIT_THRESHOLD = 3
 
 
 class JobCancelled(Exception):
@@ -168,6 +173,9 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
         ) as client:
             scraper = scraper_cls(client)
 
+            consecutive_blocks = 0
+            blocked_out = False
+
             for mapping, subcategory, category_name in targets:
                 if await _is_cancelled(db, job.id):
                     raise JobCancelled
@@ -228,22 +236,49 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
                         f"Finished {label} — {pages_here} pages read, "
                         f"{job.products_found} products so far.",
                     )
-                except (ChallengeDetected, BlockedByRobots) as exc:
+                    consecutive_blocks = 0
+                except (ChallengeDetected, BlockedByRobots, AccessBlocked) as exc:
                     await _append_event(db, job, f"{label}: {exc}", level="warning")
                     log.warning("category.blocked", site=site.key, label=label, error=str(exc))
+                    consecutive_blocks += 1
+                    if consecutive_blocks >= BLOCK_CIRCUIT_THRESHOLD:
+                        blocked_out = True
                 except Exception as exc:  # noqa: BLE001
                     await _append_event(db, job, f"{label} failed: {exc}", level="error")
                     log.exception("category.failed", site=site.key, label=label)
+                    consecutive_blocks = 0
 
                 job.completed_units += 1
                 await db.commit()
 
-            job.status = "completed"
+                if blocked_out:
+                    await _append_event(
+                        db,
+                        job,
+                        f"Stopped after {consecutive_blocks} categories in a row were "
+                        f"blocked by {site.name}. Its automated-access defences are "
+                        "refusing these requests outright - continuing would not "
+                        "change the outcome, only add more denied requests against a "
+                        "site that has already answered. This needs the site owner's "
+                        "permission, not a faster retry.",
+                        level="error",
+                    )
+                    break
+
             job.current_step = None
             job.finished_at = datetime.now(UTC)
-            await _append_event(
-                db, job, f"Run finished with {job.products_found} products collected."
-            )
+            if blocked_out:
+                job.status = "failed"
+                job.error_message = (
+                    f"{site.name} blocked {consecutive_blocks} categories in a row. "
+                    "Stopped the run early rather than continuing to send requests to "
+                    "a site that is already refusing every one of them."
+                )
+            else:
+                job.status = "completed"
+                await _append_event(
+                    db, job, f"Run finished with {job.products_found} products collected."
+                )
             await db.commit()
 
     except JobCancelled:

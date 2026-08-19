@@ -1,38 +1,11 @@
 # backend/app/taxonomy/site_maps.py
-"""Canonical subcategory -> retailer listing path, built from live retailer navigation.
-
-Every path below was checked against the real site on 2026-08-18 - either by reading
-the site's own rendered navigation menu directly, or (where marked) inferred from a
-confirmed sibling URL following an obvious, consistent pattern.
-
-Each entry is ``"cat-slug/sub-slug": MappingEntry(path, verified)``:
-
-    verified=True   read directly from the site's live navigation or a fetched page.
-                     Seeded with the amber "unverified" dot already cleared.
-    verified=False  inferred from a strongly-evidenced URL pattern (e.g. a confirmed
-                     child page implies its parent), but not fetched directly.
-                     Seeded with the amber dot still showing - check it with
-                     `make verify SITE=<site>` before relying on it for a big run.
-
-A subcategory absent from a site's dict means exactly that: this retailer does not
-carry it, or no reliable URL could be found. It will show disabled (greyed out) in
-the picker rather than pointing at a URL that doesn't exist - that is the correct,
-honest state, not a bug. Two of the four sites in particular need more work:
-
-  * TechLand's category menu is rendered client-side in JavaScript, so only the
-    subset of paths that also appear in its server-rendered SEO footer text and
-    fetched category pages could be confirmed here. `make discover SITE=techland`
-    against the real (JS-rendered) nav in a browser is the fastest way to fill gaps.
-  * Computer Mania BD is a laptop-and-components specialist, not a full-catalogue
-    electronics store - it does not sell TVs, phones, security gear, networking
-    equipment, or office equipment at all. Leaving those unmapped here is accurate,
-    not incomplete.
-
+"""
 Re-running `python -m app.cli seed` (or just restarting the app) re-applies this
 file to the database. It only ever touches rows that are still unverified - a path
 a human has confirmed with `--mark` is never silently overwritten - and it now also
 removes stale unverified rows that no longer appear here, so a category we've since
 decided not to guess at won't linger as a false "mapped" option in the picker.
+
 """
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# backend/app/scrapers/http.py
 """Polite HTTP layer.
 
 The crawler is deliberately conservative. Three mechanisms keep it that way:
@@ -9,8 +10,9 @@ The crawler is deliberately conservative. Three mechanisms keep it that way:
 
 If a site starts returning 403 or a challenge page, that is the site telling you it
 does not want automated traffic. Slow down, or get written permission - do not try to
-out-run the block. ``ChallengeDetected`` is raised so the job surfaces it clearly
-instead of silently writing garbage rows.
+out-run the block. ``ChallengeDetected`` and ``AccessBlocked`` are raised so the job
+surfaces it clearly instead of silently writing garbage rows - or, just as important,
+instead of quietly retrying a request the site has already refused.
 """
 
 from __future__ import annotations
@@ -45,6 +47,19 @@ class BlockedByRobots(ScraperError):
 
 class ChallengeDetected(ScraperError):
     """The origin served an anti-bot interstitial rather than content."""
+
+
+class AccessBlocked(ScraperError):
+    """A bare 403 with no recognised challenge page in the body.
+
+    Deliberately a *different* exception from ``TransientHTTPError``: 403 is an
+    authorization-style denial by HTTP's own design, not a "try again" status like
+    429 or 503. Retrying an identical request the site has already rejected three
+    times with backoff wastes minutes proving something the first response already
+    told us, and does it while hammering a site that has already said no. This is
+    never retried - see ``PoliteClient.get`` - and callers should treat it exactly
+    like ``ChallengeDetected``: stop, report it, move on.
+    """
 
 
 class TransientHTTPError(ScraperError):
@@ -202,14 +217,31 @@ class PoliteClient:
                     log.warning("http.rate_limited", url=url, retry_after=retry_after)
                     await asyncio.sleep(min(retry_after, 60))
                     raise TransientHTTPError("429 Too Many Requests")
-                if resp.status_code in (403, 503):
+                if resp.status_code == 403:
                     body = resp.text[:4000].lower()
                     if any(m in body for m in CHALLENGE_MARKERS):
                         raise ChallengeDetected(
-                            f"{resp.status_code} anti-bot challenge at {url}. "
+                            f"403 anti-bot challenge at {url}. "
                             "Stop and review the site's terms before continuing."
                         )
-                    raise TransientHTTPError(f"{resp.status_code} from {url}")
+                    # No challenge page, just a flat refusal. Not retried - see
+                    # AccessBlocked's docstring for why.
+                    raise AccessBlocked(
+                        f"403 from {url}, with no challenge page in the response. "
+                        "This almost always means the site is denying the request "
+                        "outright - by User-Agent, IP, or request-fingerprint rules "
+                        "- rather than something a retry or a slower pace gets past."
+                    )
+                if resp.status_code == 503:
+                    body = resp.text[:4000].lower()
+                    if any(m in body for m in CHALLENGE_MARKERS):
+                        raise ChallengeDetected(
+                            f"503 anti-bot challenge at {url}. "
+                            "Stop and review the site's terms before continuing."
+                        )
+                    # Unlike 403, a bare 503 is often genuine temporary overload or
+                    # maintenance - still worth the normal retry/backoff.
+                    raise TransientHTTPError(f"503 from {url}")
                 if resp.status_code >= 500:
                     raise TransientHTTPError(f"{resp.status_code} from {url}")
                 if resp.status_code == 404:
