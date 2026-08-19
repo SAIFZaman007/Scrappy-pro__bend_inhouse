@@ -80,7 +80,17 @@ class MappingUpdate(BaseModel):
 # --- jobs ------------------------------------------------------------------
 class JobOptions(BaseModel):
     max_pages: int = Field(default=25, ge=1, le=200)
+    # Kept so existing clients keep working. `detail_mode` supersedes it: when
+    # both are sent, `detail_mode` wins.
     fetch_details: bool = True
+    # all          - fetch every product page (richest, slowest)
+    # missing_only - only fetch when the listing row lacks price/image/features.
+    #                On StarTech that skips most products for the same columns,
+    #                roughly a 5x reduction in requests on a full catalogue run.
+    # off          - listing data only
+    # Defaults to None, not "all", so the runner can tell an unset value from an
+    # explicit one and still honour a legacy client that sent fetch_details=False.
+    detail_mode: Literal["all", "missing_only", "off"] | None = None
     detail_concurrency: int = Field(default=4, ge=1, le=8)
     id_prefix: str = Field(default="NEW", min_length=1, max_length=10, pattern=r"^[A-Za-z0-9_]+$")
 

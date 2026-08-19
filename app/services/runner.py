@@ -7,12 +7,25 @@ Responsibilities, in order:
   4. Persist in batches so a long job never holds one giant transaction open.
   5. Keep ``ScrapeJob`` progress current so the UI has something honest to show.
 
-Failure policy: a single bad page or product is logged and skipped. A site-wide
-problem (anti-bot challenge, robots.txt refusal, a bare 403) stops that category
-and is recorded on the job, because silently returning half a dataset is worse
-than reporting a partial run. If several categories in a row are blocked this
-way, the whole run stops early rather than grinding through the rest of the
-selection against a site that has already made its answer clear.
+Changes in this revision
+-----------------------
+* ``requires_browser`` from the ``sites`` row is now actually passed to
+  ``PoliteClient``. It was a column nobody read, which meant Computer Mania BD
+  never escalated to a browser no matter how it was configured.
+* New ``detail_mode`` option: ``all`` / ``missing_only`` / ``off``.
+  ``missing_only`` skips the detail request for listing rows that already carry
+  a price, an image and some features - which on StarTech is most of them.
+  On a full-catalogue run that is roughly a 5x reduction in requests for the
+  same populated columns. ``fetch_details`` is still honoured so existing API
+  clients and the current frontend keep working unchanged.
+* A category that yields zero products now says so on the job tape instead of
+  passing silently. Silent zeros are how the original encoding bug went
+  unnoticed through several releases: every run "succeeded" with no rows.
+
+Failure policy is unchanged: a single bad page or product is logged and skipped.
+A site-wide problem (anti-bot challenge, robots refusal, a bare 403) stops that
+category and is recorded on the job. If several categories in a row are blocked,
+the whole run stops rather than grinding through the rest of the selection.
 """
 
 from __future__ import annotations
@@ -121,6 +134,16 @@ def _to_model(
     )
 
 
+def _resolve_detail_mode(options: dict) -> str:
+    """``detail_mode`` if given, otherwise derive it from legacy ``fetch_details``."""
+    mode = str(options.get("detail_mode") or "").lower().strip()
+    if mode in ("all", "missing_only", "off"):
+        return mode
+    # detail_mode absent or null: honour the legacy boolean so a client that
+    # still sends fetch_details=False keeps getting listing-only runs.
+    return "all" if bool(options.get("fetch_details", True)) else "off"
+
+
 async def run_job(db: AsyncSession, job_id: Any) -> None:
     job = (await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))).scalar_one_or_none()
     if job is None:
@@ -132,10 +155,8 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
 
     site = (await db.execute(select(Site).where(Site.id == job.site_id))).scalar_one()
     options = job.options or {}
-    max_pages = min(
-        int(options.get("max_pages", 25)), settings.MAX_PAGES_PER_SUBCATEGORY
-    )
-    fetch_details = bool(options.get("fetch_details", True))
+    max_pages = min(int(options.get("max_pages", 25)), settings.MAX_PAGES_PER_SUBCATEGORY)
+    detail_mode = _resolve_detail_mode(options)
     detail_concurrency = max(1, min(int(options.get("detail_concurrency", 4)), site.concurrency))
 
     targets = await _resolve_targets(db, site.id, job.subcategory_ids)
@@ -148,7 +169,10 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
     job.pages_fetched = 0
     job.error_message = None
     await _append_event(
-        db, job, f"Run started on {site.name} across {len(targets)} categories."
+        db,
+        job,
+        f"Run started on {site.name} across {len(targets)} categories "
+        f"(details: {detail_mode}, robots: {settings.effective_robots_policy}).",
     )
     await db.commit()
 
@@ -170,6 +194,7 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
             base_url=site.base_url,
             requests_per_second=site.requests_per_second,
             concurrency=site.concurrency,
+            requires_browser=site.requires_browser,
         ) as client:
             scraper = scraper_cls(client)
 
@@ -186,6 +211,7 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
                 await db.commit()
 
                 pages_here = 0
+                found_here = 0
                 buffer: list[ScrapedProduct] = []
 
                 async def on_page(url: str, count: int) -> None:
@@ -203,39 +229,40 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
                         mapping.url_path, max_pages=max_pages, on_page=on_page
                     ):
                         buffer.append(product)
+                        found_here += 1
                         if len(buffer) >= BATCH_SIZE:
                             sequence = await _flush(
-                                db,
-                                job,
-                                buffer,
-                                scraper,
-                                site,
-                                subcategory,
-                                category_name,
-                                sequence,
-                                fetch_details,
-                                detail_concurrency,
+                                db, job, buffer, scraper, site, subcategory,
+                                category_name, sequence, detail_mode, detail_concurrency,
                             )
                             buffer = []
                     if buffer:
                         sequence = await _flush(
+                            db, job, buffer, scraper, site, subcategory,
+                            category_name, sequence, detail_mode, detail_concurrency,
+                        )
+
+                    if found_here == 0:
+                        # Never let a zero pass quietly. A category that loads
+                        # fine and yields nothing is a mapping or selector
+                        # problem, and the operator needs to see it now, not
+                        # discover it in an empty export later.
+                        await _append_event(
                             db,
                             job,
-                            buffer,
-                            scraper,
-                            site,
-                            subcategory,
-                            category_name,
-                            sequence,
-                            fetch_details,
-                            detail_concurrency,
+                            f"{label}: 0 products from {pages_here} page(s). The URL "
+                            f"loaded but no product cards were recognised - check the "
+                            f"mapped path with: python scripts/doctor.py --site "
+                            f"{site.key} --path {mapping.url_path} --save",
+                            level="warning",
                         )
-                    await _append_event(
-                        db,
-                        job,
-                        f"Finished {label} — {pages_here} pages read, "
-                        f"{job.products_found} products so far.",
-                    )
+                    else:
+                        await _append_event(
+                            db,
+                            job,
+                            f"Finished {label} — {pages_here} pages read, "
+                            f"{found_here} products here, {job.products_found} total.",
+                        )
                     consecutive_blocks = 0
                 except (ChallengeDetected, BlockedByRobots, AccessBlocked) as exc:
                     await _append_event(db, job, f"{label}: {exc}", level="warning")
@@ -256,11 +283,10 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
                         db,
                         job,
                         f"Stopped after {consecutive_blocks} categories in a row were "
-                        f"blocked by {site.name}. Its automated-access defences are "
-                        "refusing these requests outright - continuing would not "
-                        "change the outcome, only add more denied requests against a "
-                        "site that has already answered. This needs the site owner's "
-                        "permission, not a faster retry.",
+                        f"blocked by {site.name}. Continuing would only add more denied "
+                        "requests. If this site needs a browser engine, set "
+                        "requires_browser on it and re-run; otherwise reduce the "
+                        "request rate or seek the site owner's permission.",
                         level="error",
                     )
                     break
@@ -304,18 +330,31 @@ async def _flush(
     subcategory: Subcategory,
     category_name: str,
     sequence: int,
-    fetch_details: bool,
+    detail_mode: str,
     detail_concurrency: int,
 ) -> int:
     """Enrich (optionally), de-duplicate, and write one batch."""
-    if fetch_details:
-        limiter = asyncio.Semaphore(detail_concurrency)
+    if detail_mode != "off":
+        if detail_mode == "missing_only":
+            needs = [p for p in buffer if scraper.needs_enrichment(p)]
+        else:
+            needs = list(buffer)
 
-        async def enrich(item: ScrapedProduct) -> ScrapedProduct:
-            async with limiter:
-                return await scraper.enrich(item)
+        if needs:
+            limiter = asyncio.Semaphore(detail_concurrency)
 
-        buffer = list(await asyncio.gather(*(enrich(item) for item in buffer)))
+            async def enrich(item: ScrapedProduct) -> ScrapedProduct:
+                async with limiter:
+                    return await scraper.enrich(item)
+
+            await asyncio.gather(*(enrich(item) for item in needs))
+            log.info(
+                "batch.enriched",
+                site=site.key,
+                mode=detail_mode,
+                enriched=len(needs),
+                skipped=len(buffer) - len(needs),
+            )
 
     existing_urls = set(
         (
