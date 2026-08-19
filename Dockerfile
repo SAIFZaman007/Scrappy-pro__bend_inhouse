@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ---------- builder ----------
-FROM python:3.12-slim-bookworm AS builder
+FROM mcr.microsoft.com/playwright/python:v1.49.1-noble AS builder
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
 WORKDIR /build
 
@@ -13,22 +13,20 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 FROM mcr.microsoft.com/playwright/python:v1.49.1-noble AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/opt/venv/bin:$PATH"
+    PYTHONDONTWRITEBYTECODE=1
 
 RUN useradd --create-home --uid 10001 scrappy || true
 
-# Copy wheels from builder and install using Python's native pip in runtime
 COPY --from=builder /build/wheels /tmp/wheels
-RUN python -m pip install --upgrade pip \
- && python -m venv /opt/venv \
- && /opt/venv/bin/pip install /tmp/wheels/*.whl \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip \
+ && pip install --break-system-packages /tmp/wheels/*.whl \
  && rm -rf /tmp/wheels
 
 WORKDIR /app
 COPY --chown=scrappy:scrappy . .
-RUN mkdir -p /data/exports && chown -R scrappy:scrappy /data
-RUN chmod +x /app/entrypoint.sh
+RUN mkdir -p /data/exports && chown -R scrappy:scrappy /data \
+ && chmod +x /app/entrypoint.sh
 
 USER scrappy
 EXPOSE 8000
