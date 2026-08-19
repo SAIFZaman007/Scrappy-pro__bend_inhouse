@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
+ARG BASE_IMAGE=mcr.microsoft.com/playwright/python:v1.49.1-noble
+
 # ---------- builder ----------
-FROM python:3.12-slim AS builder
+FROM ${BASE_IMAGE} AS builder
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
 WORKDIR /build
 
@@ -14,8 +16,7 @@ RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install .
 
 # ---------- runtime ----------
-# Use the official Microsoft Playwright Python image (Chromium pre-installed)
-FROM mcr.microsoft.com/playwright/python:v1.49.1-noble AS runtime
+FROM ${BASE_IMAGE} AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
