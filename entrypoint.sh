@@ -5,20 +5,27 @@ wait_for_postgres() {
   echo "Waiting for PostgreSQL at ${POSTGRES_HOST}:${POSTGRES_PORT}..."
   for _ in $(seq 1 60); do
     if python -c "
-import socket,os,sys
-s=socket.socket()
-s.settimeout(2)
+import sys, os, psycopg
 try:
-    s.connect((os.environ['POSTGRES_HOST'], int(os.environ['POSTGRES_PORT'])))
-except OSError:
+    conn = psycopg.connect(
+        dbname=os.getenv('POSTGRES_DB'),
+        user=os.getenv('POSTGRES_USER'),
+        password=os.getenv('POSTGRES_PASSWORD'),
+        host=os.getenv('POSTGRES_HOST'),
+        port=os.getenv('POSTGRES_PORT', '5432'),
+        connect_timeout=2
+    )
+    conn.close()
+    sys.exit(0)
+except Exception:
     sys.exit(1)
 "; then
-      echo "PostgreSQL is up."
+      echo "PostgreSQL is up and credentials are verified."
       return 0
     fi
     sleep 2
   done
-  echo "PostgreSQL did not become reachable in time." >&2
+  echo "PostgreSQL unreachable or authentication failed within timeout." >&2
   exit 1
 }
 
