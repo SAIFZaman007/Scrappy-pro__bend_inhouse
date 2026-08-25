@@ -62,10 +62,11 @@ class BrowserUnavailable(RuntimeError):
 class BrowserFetcher:
     """One long-lived Chromium context, shared across a job."""
 
-    def __init__(self, playwright: Any, browser: Any, context: Any) -> None:
+    def __init__(self, playwright: Any, browser: Any, user_agent: str, locale: str) -> None:
         self._playwright = playwright
         self._browser = browser
-        self._context = context
+        self._user_agent = user_agent
+        self._locale = locale
         self._lock = asyncio.Lock()
 
     # -- construction -------------------------------------------------------
@@ -80,28 +81,19 @@ class BrowserFetcher:
             ) from exc
 
         playwright = await async_playwright().start()
+        
+        launch_kwargs = {"headless": settings.BROWSER_HEADLESS, "args": LAUNCH_ARGS}
+            
         try:
-            browser = await playwright.chromium.launch(
-                headless=settings.BROWSER_HEADLESS, args=LAUNCH_ARGS
-            )
+            browser = await playwright.chromium.launch(**launch_kwargs)
         except Exception as exc:  # pragma: no cover - missing browser binary
             await playwright.stop()
             raise BrowserUnavailable(
                 f"Could not launch Chromium ({exc}). Run: playwright install chromium"
             ) from exc
 
-        context = await browser.new_context(
-            user_agent=user_agent,
-            locale=locale,
-            timezone_id="Asia/Dhaka",
-            viewport={"width": 1440, "height": 900},
-            java_script_enabled=True,
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9,bn;q=0.8"},
-        )
-        await context.add_init_script(STEALTH_INIT_SCRIPT)
-        await context.route("**/*", cls._route_filter)
         log.info("browser.started", headless=settings.BROWSER_HEADLESS)
-        return cls(playwright, browser, context)
+        return cls(playwright, browser, user_agent, locale)
 
     @staticmethod
     async def _route_filter(route: Any, request: Any) -> None:
@@ -117,44 +109,41 @@ class BrowserFetcher:
         wait_for: str | None = None,
         timeout_ms: int | None = None,
     ) -> tuple[str, int]:
-        """Return ``(html, status)`` for ``url``.
-
-        Serialised behind a lock: one page at a time per browser keeps memory
-        bounded and keeps the request rate matched to the token bucket that
-        already gated this call.
-        """
+        """Return ``(html, status)`` for ``url``."""
         timeout = timeout_ms or int(settings.BROWSER_TIMEOUT_SECONDS * 1000)
-        async with self._lock:
-            page = await self._context.new_page()
-            try:
-                response = await page.goto(
-                    url, wait_until="domcontentloaded", timeout=timeout
-                )
-                status = response.status if response else 0
+        context = await self._browser.new_context(
+            user_agent=self._user_agent,
+            locale=self._locale,
+            timezone_id="Asia/Dhaka",
+            viewport={"width": 1440, "height": 900},
+            java_script_enabled=True,
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9,bn;q=0.8"},
+        )
+        await context.add_init_script(STEALTH_INIT_SCRIPT)
+        await context.route("**/*", self._route_filter)
+        
+        page = await context.new_page()
+        
+        try:
+            response = await page.goto(
+                url, wait_until="domcontentloaded", timeout=timeout
+            )
+            status = response.status if response else 0
 
-                # Cloudflare's interstitial replaces itself once the challenge
-                # clears. Waiting for network idle is the cheapest reliable way
-                # to let that happen without polling for vendor-specific markup.
+            if wait_for:
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=timeout // 2)
-                except Exception:  # noqa: BLE001 - long-poll pages never idle
-                    pass
+                    await page.wait_for_selector(wait_for, timeout=timeout // 2)
+                except Exception:
+                    log.info("browser.selector_timeout", url=url, selector=wait_for)
 
-                if wait_for:
-                    try:
-                        await page.wait_for_selector(wait_for, timeout=timeout // 2)
-                    except Exception:  # noqa: BLE001 - absent selector is not fatal
-                        log.info("browser.selector_timeout", url=url, selector=wait_for)
-
-                html = await page.content()
-                log.info("browser.fetched", url=url, status=status, bytes=len(html))
-                return html, status
-            finally:
-                await page.close()
+            html = await page.content()
+            log.info("browser.fetched", url=url, status=status, bytes=len(html))
+            return html, status
+        finally:
+            await context.close()
 
     async def close(self) -> None:
         try:
-            await self._context.close()
             await self._browser.close()
             await self._playwright.stop()
             log.info("browser.stopped")

@@ -34,7 +34,7 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -392,13 +392,3 @@ async def _flush(
     await db.commit()
     return sequence
 
-
-async def recount_products(db: AsyncSession, job_id: Any) -> int:
-    total = (
-        await db.execute(select(func.count(Product.id)).where(Product.job_id == job_id))
-    ).scalar_one()
-    await db.execute(
-        update(ScrapeJob).where(ScrapeJob.id == job_id).values(products_found=total)
-    )
-    await db.commit()
-    return int(total)

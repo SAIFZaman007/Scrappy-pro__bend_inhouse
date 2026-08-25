@@ -94,6 +94,12 @@ class ComputerManiaScraper(BaseScraper):
             return f"{url_path.rstrip('/')}/page/{page}/", None
         return url_path, None
 
+    async def fetch_listing(self, url_path: str, page: int) -> FetchResult:
+        path, params = self.listing_url(url_path, page)
+        if page > 1:
+            return await self.client.post(path, params=params)
+        return await self.client.get(path, params=params)
+
     def parse_listing(self, result: FetchResult) -> ListingPage:
         doc = self.doc(result)
 

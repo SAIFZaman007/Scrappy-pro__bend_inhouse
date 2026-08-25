@@ -171,8 +171,9 @@ async def check_site(site_key: str, path: str, save: bool, want_detail: bool) ->
             info(f"{len(jsonld)} JSON-LD blocks, no Product node on the listing page")
 
         if save:
-            out = Path(f"doctor-{site_key}-{path.strip('/').replace('/', '-') or 'root'}.html")
-            out.write_text(html, encoding="utf-8")
+            import anyio
+            out = anyio.Path(f"doctor-{site_key}-{path.strip('/').replace('/', '-') or 'root'}.html")
+            await out.write_text(html, encoding="utf-8")
             info(f"raw HTML saved to {out}")
 
         # -- 4. extraction ---------------------------------------------------

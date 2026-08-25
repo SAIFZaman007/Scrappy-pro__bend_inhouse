@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
 
+from selectolax.parser import HTMLParser
+
 from app.scrapers.base import BaseScraper, ListingPage, ScrapedProduct
 from app.scrapers.http import FetchResult
 from app.scrapers.parsing import (
@@ -49,6 +51,8 @@ class TechLandScraper(BaseScraper):
     base_url = "https://www.techlandbd.com"
 
     CARD_SELECTORS = (
+        ".products-list__item",
+        ".v2-card-lift",
         ".product-layout",
         ".product-thumb",
         ".product-grid .product",
@@ -58,7 +62,7 @@ class TechLandScraper(BaseScraper):
 
     IMAGE_SELECTOR = (
         ".thumbnails img, .product-image img, .image-additional img, "
-        ".product-gallery img, .main-image img"
+        ".product-gallery img, .main-image img, .v2-img-wrap img"
     )
     SPEC_TABLE = (
         "#tab-specification tr, .table-bordered tr, .attribute tr, table.table tr",
@@ -68,15 +72,16 @@ class TechLandScraper(BaseScraper):
     SPEC_BULLETS = "#tab-description li, .short-description li, .product-desc li"
 
     DETAIL_SELECTORS = {
-        "name": ("h1.product-title", ".product-details h1", "h1", ".product-name"),
+        "name": ("h1.product-title", ".product-details h1", "h1", ".product-name", ".v2-card-title"),
         "price": (
             ".product-price .price-new",
             ".price-new",
             "[itemprop=price]",
             ".product-price",
+            ".text-red-600",
         ),
-        "old_price": (".price-old", "del", ".product-price-old"),
-        "price_block": (".product-price", ".price"),
+        "old_price": (".price-old", "del", ".product-price-old", ".line-through"),
+        "price_block": (".product-price", ".price", ".mb-1\\.5"),
         "stock": (".product-stock", ".stock span", ".stock", ".availability"),
         "brand": (".product-manufacturer a", ".manufacturer a", "[itemprop=brand]"),
         "sku": (".product-model", ".product-sku", "[itemprop=sku]"),
@@ -84,7 +89,7 @@ class TechLandScraper(BaseScraper):
         "rating_style": (".rating .fa-stack", ".star-rating span"),
         "reviews": ("[itemprop=reviewCount]", ".review-count", "#review-title"),
         "description": ("#tab-description", ".product-description", ".tab-content"),
-        "badge": (".product-label", ".sale", ".badge"),
+        "badge": (".product-label", ".sale", ".badge", ".absolute.top-1.left-1"),
     }
 
     def listing_url(self, url_path: str, page: int) -> tuple[str, dict[str, str] | None]:
@@ -92,6 +97,10 @@ class TechLandScraper(BaseScraper):
         if page > 1:
             params["page"] = str(page)
         return url_path, params
+
+    async def fetch_listing(self, url_path: str, page: int) -> FetchResult:
+        path, params = self.listing_url(url_path, page)
+        return await self.client.get(path, params=params)
 
     def parse_listing(self, result: FetchResult) -> ListingPage:
         doc = self.doc(result)
@@ -104,22 +113,22 @@ class TechLandScraper(BaseScraper):
 
         products: list[ScrapedProduct] = []
         for card in cards:
-            href = first_attr(card, "href", ".caption h4 a", ".name a", "h4 a", ".image a", "a")
-            name = first_text(card, ".caption h4 a", ".name a", "h4", ".product-name")
+            href = first_attr(card, "href", ".caption h4 a", ".name a", "h4 a", ".image a", ".v2-card-title", "a")
+            name = first_text(card, ".v2-card-title", ".caption h4 a", ".name a", "h4", ".product-name")
             url = absolutise(href, self.base_url)
             if not url or not name:
                 continue
 
-            price = to_decimal(first_text(card, ".price-new", ".price span.price-new"))
-            old_price = to_decimal(first_text(card, ".price-old", "del"))
+            price = to_decimal(first_text(card, ".price-new", ".price span.price-new", ".text-red-600"))
+            old_price = to_decimal(first_text(card, ".price-old", "del", ".line-through"))
             if price is None:
-                figures = all_prices(first_text(card, ".price") or "")
+                figures = all_prices(first_text(card, ".price", ".mb-1\\.5") or "")
                 if figures:
                     price = min(figures)
                     if old_price is None and len(figures) > 1 and max(figures) != price:
                         old_price = max(figures)
 
-            image = image_url(q(card, ".image img, img"), self.base_url)
+            image = image_url(q(card, ".image img, .v2-img-wrap img, img"), self.base_url)
 
             products.append(
                 ScrapedProduct(
@@ -130,7 +139,7 @@ class TechLandScraper(BaseScraper):
                     old_price=old_price,
                     image=image,
                     images=[image] if image else [],
-                    badge=first_text(card, ".product-label", ".sale", ".badge"),
+                    badge=first_text(card, ".product-label", ".sale", ".badge", ".absolute.top-1.left-1"),
                     stock=normalise_stock(first_text(card, ".stock", ".product-stock")),
                     rating=to_rating(
                         first_attr(card, "style", ".rating .fa-stack, .rating span")
@@ -144,6 +153,34 @@ class TechLandScraper(BaseScraper):
             has_next=self.has_next_page(doc, self._page_of(result.url)),
             total_pages=self.total_pages(doc),
         )
+
+    def total_pages(self, doc: HTMLParser) -> int | None:
+        import math
+        import re
+        text = clean_text(doc.body.text() if doc.body else "")
+        # Try new UI format: "Showing 20 out of 116 products"
+        match = re.search(r"showing\s+(\d+)\s+out\s+of\s+(\d+)", text, re.IGNORECASE)
+        if match:
+            try:
+                showing = int(match.group(1))
+                total = int(match.group(2))
+                return math.ceil(total / showing) if showing > 0 else 1
+            except ValueError:
+                pass
+        # Fallback to old OpenCart format
+        return super().total_pages(doc)
+
+    def has_next_page(self, doc: HTMLParser, page: int) -> bool:
+        total = self.total_pages(doc)
+        if total is not None:
+            return page < total
+        # Check for active next button (new UI uses buttons)
+        from app.scrapers.parsing import qa
+        for btn in qa(doc, "button[aria-label='Next'], button"):
+            if btn.text(strip=True) == "Next" or btn.attributes.get("aria-label") == "Next":
+                if not btn.attributes.get("disabled"):
+                    return True
+        return super().has_next_page(doc, page)
 
     @staticmethod
     def _page_of(url: str) -> int:

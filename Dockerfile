@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ---------- builder ----------
-FROM mcr.microsoft.com/playwright/python:v1.49.1-noble AS builder
+FROM mcr.microsoft.com/playwright/python:v1.62.0-noble AS builder
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
 WORKDIR /build
 
@@ -10,7 +10,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip wheel --wheel-dir /build/wheels .
 
 # ---------- runtime ----------
-FROM mcr.microsoft.com/playwright/python:v1.49.1-noble AS runtime
+FROM mcr.microsoft.com/playwright/python:v1.62.0-noble AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1

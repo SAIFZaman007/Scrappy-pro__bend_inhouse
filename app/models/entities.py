@@ -239,3 +239,51 @@ class ExportFile(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     job: Mapped[ScrapeJob] = relationship(back_populates="exports")
+
+
+class GlobalProduct(Base):
+    """A deduplicated, persistent catalog item."""
+    __tablename__ = "global_products"
+    
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    brand: Mapped[str | None] = mapped_column(String(120))
+    spec_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    
+    variants: Mapped[list["ProductVariant"]] = relationship(back_populates="global_product", cascade="all, delete-orphan")
+
+
+class ProductVariant(Base):
+    """A specific retailer's listing for a GlobalProduct."""
+    __tablename__ = "product_variants"
+    __table_args__ = (
+        UniqueConstraint("global_id", "site_id", name="uq_variant_per_site"),
+    )
+    
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    global_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("global_products.id", ondelete="CASCADE"), nullable=False, index=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"), nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(120))
+    product_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    
+    latest_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    latest_stock: Mapped[str | None] = mapped_column(String(60))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    
+    global_product: Mapped[GlobalProduct] = relationship(back_populates="variants")
+    history: Mapped[list["PriceHistory"]] = relationship(back_populates="variant", cascade="all, delete-orphan")
+    site: Mapped[Site] = relationship()
+
+
+class PriceHistory(Base):
+    """Time-series ledger of price and stock changes."""
+    __tablename__ = "price_history"
+    
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    variant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("product_variants.id", ondelete="CASCADE"), nullable=False, index=True)
+    price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    stock: Mapped[str | None] = mapped_column(String(60))
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    
+    variant: Mapped[ProductVariant] = relationship(back_populates="history")

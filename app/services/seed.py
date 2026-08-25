@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.security import hash_password
-from app.models.entities import Category, SiteCategoryMap, Site, Subcategory, User
+from app.models.entities import Category, Site, SiteCategoryMap, Subcategory, User
 from app.scrapers.registry import SCRAPERS
 from app.taxonomy.site_maps import SITE_MAPS
 

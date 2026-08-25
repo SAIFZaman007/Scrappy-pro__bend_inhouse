@@ -39,6 +39,10 @@ async def run_scrape_job(ctx: dict, job_id: str) -> None:
     log.info("worker.job_start", job_id=job_id)
     async with SessionLocal() as db:
         await run_job(db, job_id)
+        
+        # Phase 2: Run matching engine to populate global catalog
+        from app.services.matching import match_job_products
+        await match_job_products(db, job_id)
     log.info("worker.job_end", job_id=job_id)
 
 

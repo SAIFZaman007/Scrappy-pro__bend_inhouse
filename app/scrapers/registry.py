@@ -21,8 +21,3 @@ def get_scraper_class(site_key: str) -> type[BaseScraper]:
     except KeyError as exc:
         raise ValueError(f"No scraper registered for site '{site_key}'") from exc
 
-
-def registered_sites() -> list[dict[str, str]]:
-    return [
-        {"key": cls.key, "name": cls.name, "base_url": cls.base_url} for cls in SCRAPERS.values()
-    ]

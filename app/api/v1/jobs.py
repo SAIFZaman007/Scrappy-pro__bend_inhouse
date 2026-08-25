@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+import anyio
 from pathlib import Path
 
 from arq.connections import ArqRedis
@@ -288,3 +289,56 @@ async def download_export(
         else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     return FileResponse(path, media_type=media_type, filename=record.filename)
+
+
+@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_job(
+    job_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> None:
+    job, _ = await _get_job(db, job_id, user)
+    
+    # Delete physical export files first
+    exports = (
+        await db.execute(select(ExportFile).where(ExportFile.job_id == job_id))
+    ).scalars().all()
+    
+    for export in exports:
+        path = anyio.Path(export.path)
+        if await path.exists():
+            await path.unlink()
+            
+    await db.delete(job)
+    await db.commit()
+
+
+@router.delete("", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_all_jobs(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> None:
+    # Get all jobs for the user
+    jobs = (
+        await db.execute(select(ScrapeJob).where(ScrapeJob.user_id == user.id))
+    ).scalars().all()
+    
+    if not jobs:
+        return
+        
+    job_ids = [job.id for job in jobs]
+    
+    # Delete physical export files for these jobs
+    exports = (
+        await db.execute(select(ExportFile).where(ExportFile.job_id.in_(job_ids)))
+    ).scalars().all()
+    
+    for export in exports:
+        path = anyio.Path(export.path)
+        if await path.exists():
+            await path.unlink()
+            
+    for job in jobs:
+        await db.delete(job)
+        
+    await db.commit()

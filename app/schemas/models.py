@@ -176,3 +176,99 @@ class HealthOut(BaseModel):
     queue: bool
     worker_alive: bool
     version: str
+
+
+class PriceHistoryOut(ORMModel):
+    id: uuid.UUID
+    variant_id: uuid.UUID
+    price: Decimal | None
+    stock: str | None
+    timestamp: datetime
+
+
+class ProductVariantOut(ORMModel):
+    id: uuid.UUID
+    global_id: uuid.UUID
+    site_id: int
+    external_id: str | None
+    product_url: str
+    latest_price: Decimal | None
+    latest_stock: str | None
+    updated_at: datetime
+    history: list[PriceHistoryOut] = []
+
+
+class GlobalProductOut(ORMModel):
+    id: uuid.UUID
+    name: str
+    brand: str | None
+    spec_hash: str
+    created_at: datetime
+    variants: list[ProductVariantOut] = []
+
+
+class GlobalProductListOut(BaseModel):
+    items: list[GlobalProductOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class AnalyticsSummaryOut(BaseModel):
+    total_products: int
+    multi_store_matches: int
+    total_runs_indexed: int
+    max_savings: Decimal
+    total_variants: int
+
+
+class SyncResultOut(BaseModel):
+    jobs_processed: int
+    products_processed: int
+    new_global_products: int
+    variants_updated: int
+
+
+class RunComparisonRequest(BaseModel):
+    run_a_id: uuid.UUID
+    run_b_id: uuid.UUID
+
+
+class RunComparisonProduct(BaseModel):
+    match_key: str
+    name: str
+    brand: str | None
+    product_a_name: str | None = None
+    product_b_name: str | None = None
+    product_a_url: str | None = None
+    product_b_url: str | None = None
+    price_a: Decimal | None = None
+    price_b: Decimal | None = None
+    stock_a: str | None = None
+    stock_b: str | None = None
+    price_diff: Decimal | None = None  # price_b - price_a
+    pct_diff: float | None = None
+    cheaper_run: Literal["A", "B", "equal", "unknown"] = "unknown"
+
+
+class RunComparisonSummary(BaseModel):
+    total_in_a: int
+    total_in_b: int
+    matched_count: int
+    only_in_a_count: int
+    only_in_b_count: int
+    cheaper_in_a_count: int
+    cheaper_in_b_count: int
+    equal_price_count: int
+    max_price_diff: Decimal
+    run_a_site_name: str
+    run_b_site_name: str
+    run_a_date: datetime
+    run_b_date: datetime
+
+
+class RunComparisonOut(BaseModel):
+    summary: RunComparisonSummary
+    matched: list[RunComparisonProduct]
+    only_in_a: list[RunComparisonProduct]
+    only_in_b: list[RunComparisonProduct]

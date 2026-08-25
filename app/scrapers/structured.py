@@ -110,24 +110,6 @@ def find_product_node(nodes: list[dict]) -> dict | None:
     return None
 
 
-def find_breadcrumb_trail(nodes: list[dict]) -> list[str]:
-    """Breadcrumb labels, useful for filling in a missing category."""
-    for node in nodes:
-        if "breadcrumblist" not in _types_of(node):
-            continue
-        items = node.get("itemListElement") or []
-        labels: list[str] = []
-        for item in items if isinstance(items, list) else []:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("name")
-            if not name and isinstance(item.get("item"), dict):
-                name = item["item"].get("name")
-            if name:
-                labels.append(str(name).strip())
-        if labels:
-            return labels
-    return []
 
 
 # --------------------------------------------------------------------------- #

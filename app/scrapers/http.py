@@ -51,7 +51,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -536,10 +536,13 @@ class PoliteClient:
         return any(marker in lowered for marker in CHALLENGE_MARKERS)
 
     # -- fetching ----------------------------------------------------------
-    async def get(
+    async def _request(
         self,
+        method: str,
         path_or_url: str,
         params: dict | None = None,
+        data: dict | str | bytes | None = None,
+        json: dict | None = None,
         *,
         allow_browser: bool | None = None,
     ) -> FetchResult:
@@ -577,7 +580,14 @@ class PoliteClient:
 
                 async with self.semaphore:
                     started = time.monotonic()
-                    resp = await self._client.get(url, params=params, headers=headers)
+                    resp = await self._client.request(
+                        method,
+                        url,
+                        params=params,
+                        data=data,
+                        json=json,
+                        headers=headers,
+                    )
                     elapsed = int((time.monotonic() - started) * 1000)
 
                 if resp.status_code == 429:
@@ -586,7 +596,7 @@ class PoliteClient:
                     await asyncio.sleep(min(retry_after, 60))
                     raise TransientHTTPError("429 Too Many Requests")
 
-                if resp.status_code in (403, 401, 406):
+                if resp.status_code in (403, 401, 406, 400):
                     body = _safe_text(resp)
                     if self._is_challenge(body, resp):
                         if settings.BROWSER_FALLBACK_ENABLED:
@@ -606,7 +616,7 @@ class PoliteClient:
                         await self._warm_up()
                         raise TransientHTTPError(f"{resp.status_code}, rotating fingerprint")
                     if settings.BROWSER_FALLBACK_ENABLED:
-                        log.info("http.escalating_to_browser", url=url, reason="403")
+                        log.info("http.escalating_to_browser", url=url, reason=str(resp.status_code))
                         return await self._get_via_browser(url, params)
                     raise AccessBlocked(
                         f"{resp.status_code} from {url} after a fingerprint rotation. "
@@ -648,6 +658,26 @@ class PoliteClient:
 
         raise TransientHTTPError(f"exhausted retries for {url}")  # pragma: no cover
 
+    async def get(
+        self,
+        path_or_url: str,
+        params: dict | None = None,
+        *,
+        allow_browser: bool | None = None,
+    ) -> FetchResult:
+        return await self._request("GET", path_or_url, params=params, allow_browser=allow_browser)
+
+    async def post(
+        self,
+        path_or_url: str,
+        params: dict | None = None,
+        data: dict | str | bytes | None = None,
+        json: dict | None = None,
+        *,
+        allow_browser: bool | None = None,
+    ) -> FetchResult:
+        return await self._request("POST", path_or_url, params=params, data=data, json=json, allow_browser=allow_browser)
+
     # -- browser escalation -------------------------------------------------
     async def _get_via_browser(self, url: str, params: dict | None) -> FetchResult:
         """Render the page in a real browser engine and hand the DOM back.
@@ -662,7 +692,7 @@ class PoliteClient:
             try:
                 self._browser = await BrowserFetcher.create(
                     user_agent=self._profile["ua"],
-                    locale="en-US",
+                    locale=self._profile.get("platform", "Windows"),
                 )
             except BrowserUnavailable as exc:
                 raise ChallengeDetected(
@@ -675,9 +705,10 @@ class PoliteClient:
             url = f"{url}{'&' if '?' in url else '?'}{query}"
 
         await self.bucket.acquire()
-        started = time.monotonic()
-        html, status = await self._browser.fetch(url)
-        elapsed = int((time.monotonic() - started) * 1000)
+        async with self.semaphore:
+            started = time.monotonic()
+            html, status = await self._browser.fetch(url)
+            elapsed = int((time.monotonic() - started) * 1000)
         self._last_url = url
         return FetchResult(
             url=url, status=status, html=html, elapsed_ms=elapsed, via="browser"

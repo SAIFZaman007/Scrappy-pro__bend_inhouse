@@ -2,14 +2,21 @@
 set -euo pipefail
 
 wait_for_postgres() {
-  echo "Waiting for PostgreSQL at ${POSTGRES_HOST}:${POSTGRES_PORT}..."
+  echo "Waiting for PostgreSQL..."
   for _ in $(seq 1 60); do
     if python -c "
 import socket,os,sys
-s=socket.socket()
-s.settimeout(2)
+from urllib.parse import urlparse
 try:
-    s.connect((os.environ['POSTGRES_HOST'], int(os.environ['POSTGRES_PORT'])))
+    url = os.environ.get('DATABASE_URL')
+    if not url:
+        sys.exit(1)
+    parsed = urlparse(url)
+    host = parsed.hostname or 'localhost'
+    port = parsed.port or 5432
+    s=socket.socket()
+    s.settimeout(2)
+    s.connect((host, port))
 except OSError:
     sys.exit(1)
 "; then

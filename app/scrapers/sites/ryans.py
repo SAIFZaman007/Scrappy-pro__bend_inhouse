@@ -50,11 +50,11 @@ class RyansScraper(BaseScraper):
         ".image-box img, .product-details-image img"
     )
     SPEC_TABLE = (
-        ".table-responsive tr, #specification tr, .specification-table tr, table.table tr",
-        "td:first-child, th",
-        "td:last-child",
+        ".table-hr-remove, .specification-table tr, table.table tr",
+        ".att-title, td:first-child, th",
+        ".att-value, td:last-child",
     )
-    SPEC_BULLETS = ".short-description li, .product-feature li, .feature-list li"
+    SPEC_BULLETS = ".short-description li, .product-feature li, .feature-list li, .category-info li"
 
     DETAIL_SELECTORS = {
         "name": ("h1.title-detail", ".product-details h1", "h1", ".product-title"),
@@ -72,7 +72,12 @@ class RyansScraper(BaseScraper):
     }
 
     def listing_url(self, url_path: str, page: int) -> tuple[str, dict[str, str] | None]:
-        return url_path, ({"page": str(page)} if page > 1 else None)
+        params = {"limit": "100"}
+        if page > 1:
+            params["page"] = str(page)
+        return url_path, params
+
+
 
     def parse_listing(self, result: FetchResult) -> ListingPage:
         doc = self.doc(result)

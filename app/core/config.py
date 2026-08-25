@@ -36,11 +36,7 @@ class Settings(BaseSettings):
     FIRST_ADMIN_PASSWORD: str = Field(min_length=10)
 
     # --- Data stores -------------------------------------------------------
-    POSTGRES_HOST: str = "postgres"
-    POSTGRES_PORT: int = 5432
-    POSTGRES_USER: str = "scrappy"
-    POSTGRES_PASSWORD: str = "scrappy"
-    POSTGRES_DB: str = "scrappy"
+    DATABASE_URL: str = "postgresql://scrappy:scrappy@postgres:5432/scrappy"
     REDIS_URL: RedisDsn = "redis://redis:6379/0"  # type: ignore[assignment]
 
     # --- Crawl policy ------------------------------------------------------
@@ -118,18 +114,18 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        return (
-            f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
-            f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-        )
+        url = self.DATABASE_URL
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
     @property
     def sync_database_url(self) -> str:
         """Used by Alembic, which runs migrations synchronously."""
-        return (
-            f"postgresql+psycopg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
-            f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-        )
+        url = self.DATABASE_URL
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+        return url.replace("postgresql://", "postgresql+psycopg://", 1)
 
 
 @lru_cache

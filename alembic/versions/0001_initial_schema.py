@@ -7,7 +7,6 @@ after this one is a normal ``alembic revision --autogenerate`` diff.
 from __future__ import annotations
 
 from alembic import op
-
 from app.db.base import Base
 from app.models import entities  # noqa: F401  (registers tables on the metadata)
 

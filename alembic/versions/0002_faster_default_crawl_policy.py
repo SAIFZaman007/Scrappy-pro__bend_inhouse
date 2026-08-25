@@ -15,6 +15,7 @@ entries in a run's tape), lower that one row rather than the whole fleet:
 from __future__ import annotations
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0002_faster_default_crawl_policy"

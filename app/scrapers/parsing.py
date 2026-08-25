@@ -170,8 +170,7 @@ def first_text(node: HTMLParser | Node | None, *selectors: str) -> str | None:
     return None
 
 
-def all_text(node: HTMLParser | Node | None, selector: str) -> list[str]:
-    return [t for n in qa(node, selector) if (t := clean_text(n.text()))]
+
 
 
 def first_attr(node: HTMLParser | Node | None, attr: str, *selectors: str) -> str | None:

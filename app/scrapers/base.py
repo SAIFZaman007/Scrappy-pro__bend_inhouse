@@ -170,6 +170,11 @@ class BaseScraper(abc.ABC):
     def listing_url(self, url_path: str, page: int) -> tuple[str, dict[str, str] | None]:
         """Return ``(path, query_params)`` for a given category page."""
 
+    async def fetch_listing(self, url_path: str, page: int) -> FetchResult:
+        """Fetch the category page. Override to use POST for AJAX grids."""
+        path, params = self.listing_url(url_path, page)
+        return await self.client.get(path, params=params)
+
     @abc.abstractmethod
     def parse_listing(self, result: FetchResult) -> ListingPage:
         """Extract product cards from a category page."""
@@ -328,10 +333,9 @@ class BaseScraper(abc.ABC):
         empty_streak = 0
 
         for page in range(1, max_pages + 1):
-            path, params = self.listing_url(url_path, page)
-            result = await self.client.get(path, params=params)
+            result = await self.fetch_listing(url_path, page)
             if result.status == 404:
-                log.info("listing.not_found", site=self.key, path=path)
+                log.info("listing.not_found", site=self.key, path=result.url)
                 break
 
             listing, used_fallback = self.parse_listing_with_fallback(result)
