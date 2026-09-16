@@ -200,6 +200,8 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
 
             consecutive_blocks = 0
             blocked_out = False
+            categories_errored = 0
+            last_error = ""
 
             for mapping, subcategory, category_name in targets:
                 if await _is_cancelled(db, job.id):
@@ -268,12 +270,16 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
                     await _append_event(db, job, f"{label}: {exc}", level="warning")
                     log.warning("category.blocked", site=site.key, label=label, error=str(exc))
                     consecutive_blocks += 1
+                    categories_errored += 1
+                    last_error = str(exc)
                     if consecutive_blocks >= BLOCK_CIRCUIT_THRESHOLD:
                         blocked_out = True
                 except Exception as exc:  # noqa: BLE001
                     await _append_event(db, job, f"{label} failed: {exc}", level="error")
                     log.exception("category.failed", site=site.key, label=label)
                     consecutive_blocks = 0
+                    categories_errored += 1
+                    last_error = str(exc)
 
                 job.completed_units += 1
                 await db.commit()
@@ -300,6 +306,15 @@ async def run_job(db: AsyncSession, job_id: Any) -> None:
                     "Stopped the run early rather than continuing to send requests to "
                     "a site that is already refusing every one of them."
                 )
+            elif job.products_found == 0 and categories_errored >= len(targets):
+                # Every category errored and nothing was collected: that is a
+                # failed run, not a "completed" one with an empty table.
+                job.status = "failed"
+                job.error_message = (
+                    f"{site.name} refused every selected category "
+                    f"(last error: {last_error[:300]}). No products were collected."
+                )
+                await _append_event(db, job, job.error_message, level="error")
             else:
                 job.status = "completed"
                 await _append_event(
@@ -391,4 +406,3 @@ async def _flush(
     job.products_found += added
     await db.commit()
     return sequence
-

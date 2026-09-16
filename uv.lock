@@ -1744,7 +1744,7 @@ requires-dist = [
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "orjson", specifier = ">=3.10.7" },
     { name = "passlib", extras = ["argon2"], specifier = ">=1.7.4" },
-    { name = "playwright", specifier = ">=1.48.0" },
+    { name = "playwright", specifier = "==1.62.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2.0" },
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pydantic-settings", specifier = ">=2.6.0" },

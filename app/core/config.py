@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import quote
 
-from pydantic import Field, RedisDsn, field_validator
+from pydantic import Field, RedisDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,42 +37,29 @@ class Settings(BaseSettings):
     FIRST_ADMIN_PASSWORD: str = Field(min_length=10)
 
     # --- Data stores -------------------------------------------------------
-    DATABASE_URL: str = "postgresql://scrappy:scrappy@postgres:5432/scrappy"
+    DATABASE_URL: str | None = None
+    POSTGRES_USER: str | None = None
+    POSTGRES_PASSWORD: str | None = None
+    POSTGRES_HOST: str | None = None
+    POSTGRES_PORT: int = 5432
+    POSTGRES_DB: str | None = None
     REDIS_URL: RedisDsn = "redis://redis:6379/0"  # type: ignore[assignment]
 
     # --- Crawl policy ------------------------------------------------------
-    # Raised from 1.0/4. These four storefronts serve thousands of concurrent
-    # shoppers; 2.5 requests per second from one client is well inside normal
-    # traffic and is what makes a full-catalogue run finish in hours rather than
-    # days. Tune per site in the `sites` table without a redeploy.
     DEFAULT_REQUESTS_PER_SECOND: float = 2.5
     DEFAULT_CONCURRENCY: int = 6
     REQUEST_TIMEOUT_SECONDS: float = 30.0
     MAX_RETRIES: int = 4
     MAX_PAGES_PER_SUBCATEGORY: int = 200
-    # Random 0..N second wait added on top of the token bucket. Perfectly even
-    # request spacing is itself a bot signal; a little jitter removes it.
     REQUEST_JITTER_SECONDS: float = 0.4
 
     # robots.txt handling.
-    #   strict   - honour every rule (default).
-    #   listings - honour robots.txt, but do not let a blanket `Disallow: /` or a
-    #              `Disallow: /*?` query rule block a catalogue path an operator
-    #              explicitly mapped. Many OpenCart robots.txt files ban query
-    #              strings to protect faceted-search crawl budget, which also
-    #              kills plain `?page=2` pagination.
-    #   off      - do not consult robots.txt at all.
-    # Anything other than `strict` is a decision about a specific site you have
-    # a right to read. It is logged loudly on every job so it is never accidental.
     ROBOTS_POLICY: Literal["strict", "listings", "off"] = "strict"
-    # Kept for backwards compatibility with existing .env files and callers.
     RESPECT_ROBOTS_TXT: bool = True
 
     # Transport.
     HTTP2_ENABLED: bool = True
     SESSION_WARMUP: bool = True
-    # When true, send USER_AGENT instead of a rotating real-browser fingerprint.
-    # Use this where you have written permission and want to be identifiable.
     USE_CUSTOM_USER_AGENT: bool = False
     USER_AGENT: str = (
         "ScrappyProBot/1.0 (+https://example.com/bot; contact=ops@example.com)"
@@ -79,7 +67,7 @@ class Settings(BaseSettings):
 
     # Headless-browser escalation, for origins that serve a JS challenge.
     BROWSER_FALLBACK_ENABLED: bool = True
-    FORCE_BROWSER: bool = False  # skip HTTP entirely; per-site flag is preferred
+    FORCE_BROWSER: bool = False
     BROWSER_HEADLESS: bool = True
     BROWSER_TIMEOUT_SECONDS: float = 45.0
 
@@ -101,6 +89,34 @@ class Settings(BaseSettings):
             return v.strip().lower()
         return v
 
+    @model_validator(mode="after")
+    def _assemble_database_url(self) -> "Settings":
+        if self.DATABASE_URL and self.DATABASE_URL.strip():
+            self.DATABASE_URL = self.DATABASE_URL.strip()
+            return self
+        missing = [
+            name
+            for name in ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_HOST", "POSTGRES_DB")
+            if not getattr(self, name)
+        ]
+        if missing:
+            raise ValueError(
+                "Database is not configured: set DATABASE_URL, or all of "
+                f"POSTGRES_USER/PASSWORD/HOST/DB (missing: {', '.join(missing)})."
+            )
+        # Passwords with @ : / etc. must be percent-encoded inside a URL.
+        self.DATABASE_URL = (
+            f"postgresql://{quote(self.POSTGRES_USER, safe='')}:"
+            f"{quote(self.POSTGRES_PASSWORD, safe='')}@{self.POSTGRES_HOST}:"
+            f"{self.POSTGRES_PORT}/{quote(self.POSTGRES_DB, safe='')}"
+        )
+        return self
+
+    @property
+    def database_host(self) -> str:
+        """Host:port/db only - safe to log (no credentials)."""
+        return self.DATABASE_URL.rsplit("@", 1)[-1]
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
@@ -112,20 +128,22 @@ class Settings(BaseSettings):
             return "off"
         return self.ROBOTS_POLICY
 
+    def _base_url(self) -> str:
+        """Normalise any accepted scheme to plain ``postgresql://``."""
+        url = str(self.DATABASE_URL)
+        for prefix in ("postgres://", "postgresql+asyncpg://", "postgresql+psycopg://"):
+            if url.startswith(prefix):
+                return "postgresql://" + url[len(prefix):]
+        return url
+
     @property
     def database_url(self) -> str:
-        url = self.DATABASE_URL
-        if url.startswith("postgres://"):
-            url = url.replace("postgres://", "postgresql://", 1)
-        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return self._base_url().replace("postgresql://", "postgresql+asyncpg://", 1)
 
     @property
     def sync_database_url(self) -> str:
         """Used by Alembic, which runs migrations synchronously."""
-        url = self.DATABASE_URL
-        if url.startswith("postgres://"):
-            url = url.replace("postgres://", "postgresql://", 1)
-        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+        return self._base_url().replace("postgresql://", "postgresql+psycopg://", 1)
 
 
 @lru_cache

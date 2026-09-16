@@ -10,7 +10,9 @@ from app.db.base import Base
 from app.models import entities  # noqa: F401  (import registers every table)
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.sync_database_url)
+# configparser treats "%" as interpolation; escape it so percent-encoded
+# passwords (e.g. "@" -> "%40") survive.
+config.set_main_option("sqlalchemy.url", settings.sync_database_url.replace("%", "%%"))
 
 if config.config_file_name:
     fileConfig(config.config_file_name)

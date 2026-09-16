@@ -72,7 +72,9 @@ The background worker executes heavy browser automation tasks via Playwright and
 4. **Dockerfile (CRITICAL):** Change the Dockerfile path to `/backend/Dockerfile.worker`. The worker needs a different configuration because it doesn't open port 8000, which would cause Coolify's default healthchecks to infinitely restart the container.
 5. **Domains:** **Do not assign a public domain** to the worker. It does not accept web traffic.
 6. **Environment Variables:** Supply the **exact same Environment Variables** (`REDIS_URL`, `DATABASE_URL`, `SECRET_KEY`, etc.) as the API server.
-7. **Deploy:** Hit deploy. The worker will automatically connect to Redis and begin waiting for jobs.
+   > ⚠️ `DATABASE_URL` (or the full `POSTGRES_USER/PASSWORD/HOST/DB` set) is **required on the worker too**. There is no built-in default any more: a worker without it refuses to start and logs `worker.database_unreachable`. (Previously it silently fell back to `postgres:5432/scrappy`, heartbeat looked healthy, and every run stayed "queued".) Use Coolify **Shared Variables** so API and worker can never drift apart.
+7. **Deploy:** Hit deploy. Look for `worker.online` in the logs — it is only printed after the database has been reached.
+8. **Self-healing:** every minute the worker re-queues runs whose enqueue was lost and marks runs ARQ already failed as `failed` with the reason, so nothing sits on "queued" forever.
 
 ---
 
@@ -85,11 +87,11 @@ The frontend is a React application built with Vite, served via an Nginx reverse
 4. **Dockerfile:** Coolify will auto-detect `/frontend/Dockerfile`.
 5. **Domains:** Set the domain to your frontend domain (e.g., `https://scrappy.example.com`).
 6. **Ports:** Set the container port to `80`. Nginx serves the compiled static files here.
-7. **Environment Variables:** You do **not** need to set `VITE_API_BASE` for production. Nginx handles the reverse proxying automatically.
-8. **Critical Nginx Configuration**:
-   The frontend uses Nginx to serve static files and proxy `/api` requests to the backend. Because Coolify changes container IPs on redeploy, the `frontend/nginx.conf` is configured to proxy via the public domain.
-   - You must edit `frontend/nginx.conf` before deploying and ensure `set $backend_upstream` matches your actual Backend API domain (e.g., `set $backend_upstream https://api.scrappy.example.com;`).
-   - The Nginx config uses `resolver 127.0.0.11` to handle dynamic IP changes from the edge proxy.
+7. **Environment Variables (runtime, no rebuild needed):** do **not** set `VITE_API_BASE` (the SPA always calls same-origin `/api/v1`; the CSP would block an absolute URL anyway). Set:
+   - `BACKEND_URL` — e.g. `https://api.scrappy.example.com`
+   - `BACKEND_HOST` — e.g. `api.scrappy.example.com`
+   - `DNS_RESOLVERS` — default `1.1.1.1 8.8.8.8`
+8. **Nginx:** `frontend/nginx/default.conf.template` is rendered from those variables at container start. It resolves the backend through two public resolvers (cached 5 min) instead of Docker's `127.0.0.11`, whose forwarding of public names returned SERVFAIL in production and caused 502s. If the backend is ever unreachable, `/api/*` answers a JSON 503 the UI can display instead of an nginx HTML page.
 9. **Deploy:** Hit deploy.
 
 ---

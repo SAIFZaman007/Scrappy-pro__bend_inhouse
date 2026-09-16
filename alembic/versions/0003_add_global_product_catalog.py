@@ -17,6 +17,10 @@ depends_on = None
 
 
 def upgrade() -> None:
+
+    if sa.inspect(op.get_bind()).has_table("global_products"):
+        return
+
     # 1. global_products
     op.create_table('global_products',
         sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
