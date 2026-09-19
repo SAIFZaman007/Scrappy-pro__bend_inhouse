@@ -362,7 +362,14 @@ async def _flush(
                 async with limiter:
                     return await scraper.enrich(item)
 
-            await asyncio.gather(*(enrich(item) for item in needs))
+            # TaskGroup cancels the remaining detail requests as soon as one of
+            # them reports that the site is refusing access.
+            try:
+                async with asyncio.TaskGroup() as group:
+                    for item in needs:
+                        group.create_task(enrich(item))
+            except* (AccessBlocked, BlockedByRobots, ChallengeDetected) as eg:
+                raise eg.exceptions[0] from None
             log.info(
                 "batch.enriched",
                 site=site.key,

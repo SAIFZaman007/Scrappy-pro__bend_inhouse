@@ -32,14 +32,14 @@ OTHER CHANGES
   User-Agent as automation and answer 403 before the application ever runs.
 * A persistent cookie jar plus a one-time homepage warm-up, so session cookies
   (PHPSESSID, XSRF-TOKEN, __cf_bm) exist before the first listing request.
-* 403 is retried **once** with a rotated fingerprint and a fresh session before
-  being treated as a refusal - most 403s from these sites are UA heuristics, not
-  a deliberate policy decision. A second 403 is taken at face value.
+* 401/403 and anti-bot challenges are final: the job records the refusal and
+  stops that category. No identity rotation, no browser retry.
 * ``ROBOTS_POLICY`` replaces the boolean: strict / listings / off, so an
   over-broad ``Disallow: /`` cannot silently zero out a run without the operator
   being told exactly what happened.
-* Optional escalation to a real headless browser (see ``browser.py``) for
-  origins that answer a JS challenge, wired through ``requires_browser``.
+* Optional headless-browser rendering (see ``browser.py``) for sites flagged
+  ``requires_browser`` whose catalogue is rendered client-side. It is never used
+  to get past a refusal or a challenge.
 
 Rate limiting, Retry-After handling and per-host backoff are unchanged in
 spirit: this crawler is meant to look like a well-behaved logged-out shopper,
@@ -208,7 +208,7 @@ class FetchResult:
     """One fetched page.
 
     ``via`` records which transport produced it ("http" or "browser") so the CLI
-    and the job event tape can tell an operator when a page needed escalation.
+    and the job event tape can tell an operator which pages were rendered in a browser.
     """
 
     url: str
@@ -316,7 +316,7 @@ class PoliteClient:
     """One instance per scrape job, per site.
 
     Holds the rate limiter, the cookie jar, the robots policy and - when the site
-    needs it - a lazily started headless browser for escalation.
+    needs it - a lazily started headless browser for client-side rendering.
     """
 
     def __init__(
@@ -529,8 +529,8 @@ class PoliteClient:
         return urljoin(self.base_url + "/", path_or_url.lstrip("/"))
 
     @staticmethod
-    def _is_challenge(body: str, resp: httpx.Response) -> bool:
-        if resp.headers.get("cf-mitigated", "").lower() == "challenge":
+    def _is_challenge(body: str, resp: httpx.Response | None) -> bool:
+        if resp is not None and resp.headers.get("cf-mitigated", "").lower() == "challenge":
             return True
         lowered = body[:8000].lower()
         return any(marker in lowered for marker in CHALLENGE_MARKERS)
@@ -546,7 +546,7 @@ class PoliteClient:
         *,
         allow_browser: bool | None = None,
     ) -> FetchResult:
-        """Fetch one URL under the full politeness/retry/escalation policy."""
+        """Fetch one URL under the full politeness and retry policy."""
         url = self.absolute(path_or_url)
         if not self.is_allowed(url):
             raise BlockedByRobots(
@@ -559,7 +559,6 @@ class PoliteClient:
         if use_browser and settings.BROWSER_FALLBACK_ENABLED:
             return await self._get_via_browser(url, params)
 
-        rotated_once = False
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(settings.MAX_RETRIES),
             wait=wait_exponential_jitter(initial=2, max=30),
@@ -596,40 +595,28 @@ class PoliteClient:
                     await asyncio.sleep(min(retry_after, 60))
                     raise TransientHTTPError("429 Too Many Requests")
 
-                if resp.status_code in (403, 401, 406, 400):
+                if resp.status_code in (401, 403):
+                    # A refusal is the site's answer. We do not rotate identity,
+                    # re-warm sessions, or re-try through a browser to get past it.
                     body = _safe_text(resp)
                     if self._is_challenge(body, resp):
-                        if settings.BROWSER_FALLBACK_ENABLED:
-                            log.info("http.escalating_to_browser", url=url)
-                            return await self._get_via_browser(url, params)
                         raise ChallengeDetected(
-                            f"{resp.status_code} anti-bot challenge at {url}. "
-                            "Enable BROWSER_FALLBACK_ENABLED to solve it with a real "
-                            "browser engine, or reduce the request rate."
+                            f"{resp.status_code} anti-bot challenge at {url}. This site "
+                            "is refusing automated access; request data access from the "
+                            "site owner or disable it in Scrappy Pro."
                         )
-                    if not rotated_once:
-                        # Most flat refusals from these storefronts are User-Agent
-                        # heuristics. One clean retry under a different identity is
-                        # worth it; a second refusal is the site's real answer.
-                        rotated_once = True
-                        await self._rotate_fingerprint()
-                        await self._warm_up()
-                        raise TransientHTTPError(f"{resp.status_code}, rotating fingerprint")
-                    if settings.BROWSER_FALLBACK_ENABLED:
-                        log.info("http.escalating_to_browser", url=url, reason=str(resp.status_code))
-                        return await self._get_via_browser(url, params)
                     raise AccessBlocked(
-                        f"{resp.status_code} from {url} after a fingerprint rotation. "
-                        "The site is refusing this client outright rather than rate "
-                        "limiting it. Enable BROWSER_FALLBACK_ENABLED, or contact the "
-                        "site for API/data access."
+                        f"{resp.status_code} from {url}. The site is refusing automated "
+                        "access. Request data access from the site owner or disable "
+                        "this site in Scrappy Pro."
                     )
+
+                if resp.status_code in (400, 406):
+                    raise AccessBlocked(f"{resp.status_code} from {url}.")
 
                 if resp.status_code == 503:
                     body = _safe_text(resp)
                     if self._is_challenge(body, resp):
-                        if settings.BROWSER_FALLBACK_ENABLED:
-                            return await self._get_via_browser(url, params)
                         raise ChallengeDetected(f"503 anti-bot challenge at {url}.")
                     raise TransientHTTPError(f"503 from {url}")
 
@@ -643,8 +630,6 @@ class PoliteClient:
 
                 html = _decode_body(resp)
                 if self._is_challenge(html, resp):
-                    if settings.BROWSER_FALLBACK_ENABLED:
-                        return await self._get_via_browser(url, params)
                     raise ChallengeDetected(f"Anti-bot challenge served at {url}.")
 
                 self._last_url = str(resp.url)
@@ -678,7 +663,7 @@ class PoliteClient:
     ) -> FetchResult:
         return await self._request("POST", path_or_url, params=params, data=data, json=json, allow_browser=allow_browser)
 
-    # -- browser escalation -------------------------------------------------
+    # -- browser rendering --------------------------------------------------
     async def _get_via_browser(self, url: str, params: dict | None) -> FetchResult:
         """Render the page in a real browser engine and hand the DOM back.
 
@@ -709,6 +694,12 @@ class PoliteClient:
             started = time.monotonic()
             html, status = await self._browser.fetch(url)
             elapsed = int((time.monotonic() - started) * 1000)
+        if status in (401, 403):
+            raise AccessBlocked(
+                f"{status} from {url}. The site is refusing automated access."
+            )
+        if self._is_challenge(html, None):
+            raise ChallengeDetected(f"Anti-bot challenge served at {url}.")
         self._last_url = url
         return FetchResult(
             url=url, status=status, html=html, elapsed_ms=elapsed, via="browser"

@@ -34,7 +34,13 @@ from decimal import Decimal
 from selectolax.parser import HTMLParser
 
 from app.core.logging import get_logger
-from app.scrapers.http import FetchResult, PoliteClient
+from app.scrapers.http import (
+    AccessBlocked,
+    BlockedByRobots,
+    ChallengeDetected,
+    FetchResult,
+    PoliteClient,
+)
 from app.scrapers.parsing import (
     all_prices,
     clean_text,
@@ -379,6 +385,10 @@ class BaseScraper(abc.ABC):
             if result.status == 404 or not result.html:
                 return product
             product.merge_detail(self.parse_detail(result))
+        except (AccessBlocked, ChallengeDetected, BlockedByRobots):
+            # A refusal applies to the whole site, not this one page: stop here
+            # instead of sending the rest of the batch to be refused too.
+            raise
         except Exception as exc:  # noqa: BLE001 - one bad page must not kill a job
             log.warning(
                 "detail.failed", site=self.key, url=product.product_url, error=str(exc)
